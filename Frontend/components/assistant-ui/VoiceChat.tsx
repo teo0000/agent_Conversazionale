@@ -1,18 +1,17 @@
 "use client";
 import React, { useRef, useState } from "react";
+import { removeDuplicatePhrases, cleanTextForTTS } from "../../lib/text-utils";
 
 const VoiceChat: React.FC<{
     recording: boolean;
     onStart: () => void;
     onStop: () => void;
     responseText: string | null;
-    setResponseText: (text: string) => void;
-    addUserMessage?: (text: string) => void;
-    addAssistantMessage?: (text: string) => void;
+    setResponseText: (text: string | null) => void;
     addErrorMessage?: (text: string) => void;
-    lastSentVoiceText?: string | null;
-    setLastSentVoiceText?: (text: string) => void;
-}> = ({ recording, onStart, onStop, responseText, setResponseText, addUserMessage, addAssistantMessage, addErrorMessage, lastSentVoiceText, setLastSentVoiceText }) => {
+    onAudioSendToBackend?: () => void;
+    onProcessTranscribedText: (text: string) => void;
+}> = ({ recording, onStart, onStop, responseText, setResponseText, addErrorMessage, onAudioSendToBackend, onProcessTranscribedText }) => {
     const autoStopTimerRef = useRef<NodeJS.Timeout | null>(null);
     const processingStopRef = useRef(false);
     const [audioUrl, setAudioUrl] = useState<string | null>(null);
@@ -75,6 +74,7 @@ const VoiceChat: React.FC<{
                     formData.append("file", audioBlob, "audio.webm");
                     try {
                         console.log("VoiceChat: Sending audio to backend for transcription...");
+                        if (onAudioSendToBackend) onAudioSendToBackend(); // CHIAMA LA CALLBACK
                         const res = await fetch("http://localhost:8000/agent/audio", {
                             method: "POST",
                             body: formData,
@@ -84,88 +84,13 @@ const VoiceChat: React.FC<{
                             const data = await res.json();
                             console.log("VoiceChat: Transcription response data:", data);
                             setAudioUrl(null);
-                            function removeDuplicatePhrases(text: string): string {
-                                const words = text.trim().split(/\s+/);
-                                const n = words.length;
-                                for (let len = Math.floor(n / 2); len >= 2; len--) {
-                                    for (let start = 0; start <= n - 2 * len; start++) {
-                                        const seq1 = words.slice(start, start + len).join(" ");
-                                        const seq2 = words.slice(start + len, start + 2 * len).join(" ");
-                                        if (seq1 === seq2) {
-                                            return [
-                                                ...words.slice(0, start + len),
-                                                ...words.slice(start + 2 * len)
-                                            ].join(" ");
-                                        }
-                                    }
-                                }
-                                return text;
-                            }
                             let cleanText = data.transcribed_text || "";
                             cleanText = removeDuplicatePhrases(cleanText);
+                            cleanText = cleanTextForTTS(cleanText); // Applica la pulizia
                             console.log("VoiceChat: Testo pulito inviato:", cleanText);
-                            if (lastSentVoiceText && cleanText && cleanText.trim() === lastSentVoiceText.trim()) {
-                                setResponseText(cleanText);
-                                if (addErrorMessage) addErrorMessage("Richiesta già inviata. Ignorato doppio invio vocale.");
-                                return;
-                            }
-                            if (setLastSentVoiceText && cleanText) setLastSentVoiceText(cleanText);
                             setResponseText(cleanText);
-                            if (cleanText && addUserMessage) {
-                                addUserMessage(cleanText);
-                                console.log("VoiceChat: Sending message history to agent endpoint...");
-                                const chatRes = await fetch("http://localhost:8000/agent", {
-                                    method: "POST",
-                                    headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({
-                                        messages: [
-                                            { type: "human", content: cleanText }
-                                        ]
-                                    }),
-                                });
-                                console.log("VoiceChat: Agent response status:", chatRes.status);
-                                if (chatRes.ok) {
-                                    const chatData = await chatRes.json();
-                                    console.log("VoiceChat: Agent response data:", chatData);
-                                    const agentMsg = Array.isArray(chatData.messages)
-                                        ? chatData.messages.reverse().find((m: any) => m.type === "ai" && m.content)
-                                        : null;
-                                    if (agentMsg && addAssistantMessage) {
-                                        addAssistantMessage(agentMsg.content);
-
-                                        // --- INIZIO: Chiamata a TTS per la risposta dell'assistente ---
-                                        try {
-                                            console.log("VoiceChat: Requesting TTS for assistant response:", agentMsg.content);
-                                            const ttsRes = await fetch("http://localhost:8000/agent/tts", {
-                                                method: "POST",
-                                                headers: { "Content-Type": "application/json" },  
-                                                body: JSON.stringify({ text: agentMsg.content }),
-                                            });
-
-                                            if (ttsRes.ok) {
-                                                const audioBlob = await ttsRes.blob();
-                                                const audioUrl = URL.createObjectURL(audioBlob);
-                                                const audio = new Audio(audioUrl);
-                                                audio.play().catch(e => console.error("Error playing TTS audio for assistant:", e));
-                                                console.log("VoiceChat: Playing TTS audio for assistant response.");
-                                                audio.onended = () => {
-                                                    URL.revokeObjectURL(audioUrl);
-                                                    console.log("VoiceChat: Revoked TTS audio URL for assistant response.");
-                                                };
-                                            } else {
-                                                const ttsErrText = await ttsRes.text();
-                                                console.error("VoiceChat: TTS API request failed for assistant response.", ttsRes.status, ttsErrText);
-                                            }
-                                        } catch (ttsErr) {
-                                            console.error("VoiceChat: Error during TTS fetch operation for assistant response:", ttsErr);
-                                        }
-                                        // --- FINE: Chiamata a TTS ---
-                                    }
-                                } else {
-                                    const errText = await chatRes.text();
-                                    console.error("VoiceChat: Agent API request failed.", errText);
-                                    if (addErrorMessage) addErrorMessage("Errore dal backend: " + errText);
-                                }
+                            if (cleanText.trim() && onProcessTranscribedText) {
+                                onProcessTranscribedText(cleanText);
                             }
                         } else {
                             const errText = await res.text();
@@ -196,10 +121,10 @@ const VoiceChat: React.FC<{
             // Stop automatico dopo 5 secondi
             autoStopTimerRef.current = setTimeout(() => {
                 if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-                    console.log("VoiceChat: Auto-stopping after 5 seconds");
+                    console.log("VoiceChat: Auto-stopping after 10 seconds");
                     mediaRecorderRef.current.stop();
                 }
-            }, 5000);
+            }, 10000);
         } catch (err) {
             console.error("VoiceChat: Error starting recording (getUserMedia or MediaRecorder setup):", err);
             setResponseText("Errore nell'accesso al microfono o nella registrazione.");

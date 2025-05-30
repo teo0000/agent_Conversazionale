@@ -19,6 +19,7 @@ import {
   SendHorizontalIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { cleanTextForProcessing } from "../../lib/text-utils";
 
 import { Button } from "@/components/ui/button";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
@@ -29,35 +30,166 @@ export const Thread: FC = () => {
   const [showVoiceChat, setShowVoiceChat] = React.useState(false);
   const [recording, setRecording] = React.useState(false);
   const [responseText, setResponseText] = React.useState<string | null>(null);
-  // Stato per evitare doppio invio vocale
-  const [lastSentVoiceText, setLastSentVoiceText] = React.useState<string | null>(null);
-
   // Stato dei messaggi della chat
   const [messages, setMessages] = React.useState<{ role: string; content: string }[]>([]);
+  // Stato per il valore della textarea
+  const [inputValue, setInputValue] = React.useState("");
 
   // Funzione per aggiungere un messaggio utente
-  const addUserMessage = (message: string) => {
-    setMessages((prev) => [...prev, { role: "user", content: message }]);
-  };
+  const addUserMessage = React.useCallback((message: string) => {
+    setMessages(prev => {
+      const updated = [...prev, { role: "user", content: message }];
+      console.log("[addUserMessage] Stato aggiornato:", updated);
+      return updated;
+    });
+  }, []);
 
   // Funzione per aggiungere un messaggio assistente
-  const addAssistantMessage = (message: string) => {
-    setMessages((prev) => [...prev, { role: "assistant", content: message }]);
-  };
+  const addAssistantMessage = React.useCallback((message: string) => {
+    setMessages(prev => {
+      const updated = [...prev, { role: "assistant", content: message }];
+      console.log("[addAssistantMessage] Stato aggiornato:", updated);
+      return updated;
+    });
+  }, []);
 
   // Funzione per aggiungere un messaggio di errore
-  const addErrorMessage = (message: string) => {
-    setMessages((prev) => [...prev, { role: "error", content: message }]);
-  };
+  const addErrorMessage = React.useCallback((message: string) => {
+    setMessages(prev => {
+      const updated = [...prev, { role: "error", content: message }];
+      console.log("[addErrorMessage] Stato aggiornato:", updated);
+      return updated;
+    });
+  }, []);
 
   // Funzioni di controllo per VoiceChat
   const handleStart = () => setRecording(true);
   const handleStop = () => setRecording(false);
 
-  // Quando la trascrizione è pronta, aggiorna lo stato
+  // Funzione per inviare il messaggio (sia da testo che da voce)
+  const handleSend = React.useCallback(async (message?: string, isFromVoice: boolean = false) => {
+    let msgToProcess = message !== undefined ? message : inputValue;
+    msgToProcess = cleanTextForProcessing(msgToProcess);
+    console.log("[handleSend] Initial 'messages' state before this send:", JSON.stringify(messages, null, 2));
+    console.log("[handleSend] Attempting to send message:", msgToProcess);
+
+    if (msgToProcess.trim() !== "") {
+      setInputValue(""); // Svuota la textarea
+      setResponseText(null); // Nasconde il testo trascritto
+
+      // Aggiorna subito la UI con il messaggio utente
+      setMessages(prev => {
+        const updated = [...prev, { role: "user", content: msgToProcess }];
+        console.log("[handleSend] Stato aggiornato (user message):", updated);
+        return updated;
+      });
+
+      try {
+        // Costruisci la history includendo il messaggio appena aggiunto
+        const currentMessagesSnapshot = [
+          ...messages,
+          { role: "user", content: msgToProcess }
+        ];
+        const historyPayload = [
+          ...currentMessagesSnapshot.map(m =>
+            m.role === "user"
+              ? { type: "human", content: m.content }
+              : m.role === "assistant"
+                ? { type: "ai", content: m.content }
+                : null
+          ).filter(Boolean)
+        ];
+        const lastN = 10;
+        const limitedHistory = historyPayload.slice(-lastN);
+
+        console.log("[handleSend] Constructed 'limitedHistory' for backend:", JSON.stringify(limitedHistory, null, 2));
+
+        const chatRes = await fetch("http://localhost:8000/agent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messages: limitedHistory
+          }),
+        });
+        console.log("[handleSend] User message added to UI state (after history construction).");
+
+        console.log("[handleSend] Backend response status:", chatRes.status);
+        if (chatRes.ok) {
+          const chatData = await chatRes.json();
+          console.log("[handleSend] Backend response data:", JSON.stringify(chatData, null, 2));
+
+          // Estrai il messaggio dell'assistente
+          let assistantContent = null;
+          if (chatData && Array.isArray(chatData.messages)) {
+            const agentMsgObj = chatData.messages
+              .slice()
+              .reverse()
+              .find((m: any) => m.type === "ai" && m.content && typeof m.content === 'string' && m.content.trim() !== "");
+            if (agentMsgObj) {
+              assistantContent = agentMsgObj.content;
+            }
+          }
+
+          if (assistantContent) {
+            console.log("[handleSend] Assistant message found:", assistantContent);
+            setMessages(prev => {
+              const updated = [...prev, { role: "assistant", content: assistantContent }];
+              console.log("[handleSend] Stato aggiornato (assistant message):", updated);
+              return updated;
+            });
+            // TTS per la risposta assistente
+            try {
+              const ttsRes = await fetch("http://localhost:8000/agent/tts", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: assistantContent }),
+              });
+              if (ttsRes.ok) {
+                const audioBlob = await ttsRes.blob();
+                const audioUrl = URL.createObjectURL(audioBlob);
+                const audio = new Audio(audioUrl);
+                audio.play().catch(e => console.error("Error playing TTS audio for assistant:", e));
+                audio.onended = () => URL.revokeObjectURL(audioUrl);
+              }
+            } catch (ttsErr) {
+              console.error("[Thread] Error during TTS fetch operation for assistant response:", ttsErr);
+            }
+          } else {
+            console.warn("[handleSend] No valid assistant message content found in response:", chatData);
+            setMessages(prev => {
+              const updated = [...prev, { role: "error", content: "L'assistente ha risposto, ma il formato del messaggio non è stato riconosciuto. Dati: " + JSON.stringify(chatData).substring(0, 200) + "..." }];
+              console.log("[handleSend] Stato aggiornato (error message):", updated);
+              return updated;
+            });
+          }
+        } else {
+          const errText = await chatRes.text();
+          console.error("[handleSend] Backend error response:", errText);
+          setMessages(prev => {
+            const updated = [...prev, { role: "error", content: "Errore dal backend: " + errText }];
+            console.log("[handleSend] Stato aggiornato (backend error):", updated);
+            return updated;
+          });
+        }
+      } catch (err: any) {
+        setMessages(prev => {
+          const updated = [...prev, { role: "error", content: "Errore di rete: " + (err?.message || err) }];
+          console.log("[handleSend] Stato aggiornato (network error):", updated);
+          return updated;
+        });
+        console.error("[handleSend] Network or other error:", err);
+      }
+    } else {
+      console.log("[handleSend] Message is empty, not sending.");
+    }
+  }, [inputValue, messages, addUserMessage, addAssistantMessage, addErrorMessage]);
+
+  // Quando la trascrizione è pronta, invia il messaggio e resetta la textarea SOLO dopo l'invio
   const handleVoiceChatStop = (text?: string) => {
     setRecording(false);
-    if (text !== undefined) setResponseText(text);
+    if (text !== undefined && text.trim() !== "") {
+      handleSend(text); // Invia il messaggio e resetta tutto
+    }
   };
 
   return (
@@ -126,7 +258,9 @@ export const Thread: FC = () => {
             recording={recording}
             onStart={handleStart}
             onStop={handleStop}
-            responseText={responseText}
+            inputValue={inputValue}
+            setInputValue={setInputValue}
+            onSend={() => handleSend()}
           />
         </div>
       </ThreadPrimitive.Viewport>
@@ -138,11 +272,12 @@ export const Thread: FC = () => {
           onStop={handleStop}
           responseText={responseText}
           setResponseText={setResponseText}
-          addUserMessage={addUserMessage}
-          addAssistantMessage={addAssistantMessage}
           addErrorMessage={addErrorMessage}
-          lastSentVoiceText={lastSentVoiceText}
-          setLastSentVoiceText={setLastSentVoiceText}
+          onAudioSendToBackend={() => {
+            setRecording(false);
+            setShowVoiceChat(false);
+          }}
+          onProcessTranscribedText={(text) => handleSend(text, true)}
         />
       )}
     </ThreadPrimitive.Root>
@@ -206,26 +341,56 @@ const ThreadWelcomeSuggestions: FC = () => {
   );
 };
 
-const Composer: FC<{ onVoiceClick?: () => void; voiceActive?: boolean; recording?: boolean; onStart?: () => void; onStop?: () => void; responseText?: string | null }> = ({ onVoiceClick, voiceActive, recording, onStart, onStop, responseText }) => {
+// Modifica il componente Composer per gestire inputValue e setInputValue
+const Composer: FC<{
+  onVoiceClick?: () => void;
+  voiceActive?: boolean;
+  recording?: boolean;
+  onStart?: () => void;
+  onStop?: () => void;
+  responseText?: string | null;
+  inputValue: string;
+  setInputValue: (v: string) => void;
+  onSend: () => void;
+}> = ({ onVoiceClick, voiceActive, recording, onStart, onStop, responseText, inputValue, setInputValue, onSend }) => {
   return (
-    <ComposerPrimitive.Root className="focus-within:border-ring/20 flex w-full flex-wrap items-end rounded-lg border bg-inherit px-2.5 shadow-sm transition-colors ease-in">
-      <ComposerPrimitive.Input
-        rows={1}
-        autoFocus
-        placeholder={recording ? "Sto registrando..." : "Write a message..."}
-        className="placeholder:text-muted-foreground max-h-40 flex-grow resize-none border-none bg-transparent px-2 py-4 text-sm outline-none focus:ring-0 disabled:cursor-not-allowed"
-      />
-      <ComposerAction onVoiceClick={onVoiceClick} voiceActive={voiceActive} recording={recording} onStart={onStart} onStop={onStop} />
-      {responseText && (
-        <div className="w-full text-xs text-blue-700 dark:text-blue-300 mt-2 px-2">
-          <b>Testo interpretato:</b> {responseText}
-        </div>
-      )}
+    <ComposerPrimitive.Root asChild>
+      <form
+        className="focus-within:border-ring/20 flex w-full flex-wrap items-end rounded-lg border bg-inherit px-2.5 shadow-sm transition-colors ease-in"
+        onSubmit={e => {
+          e.preventDefault();
+          onSend();
+        }}
+      >
+        <ComposerPrimitive.Input
+          rows={1}
+          autoFocus
+          placeholder={recording ? "Sto registrando..." : "Write a message..."}
+          className="placeholder:text-muted-foreground max-h-40 flex-grow resize-none border-none bg-transparent px-2 py-4 text-sm outline-none focus:ring-0 disabled:cursor-not-allowed"
+          value={inputValue}
+          onChange={e => setInputValue(e.target.value)}
+          name="input"
+        />
+        <ComposerAction
+          onVoiceClick={onVoiceClick}
+          voiceActive={voiceActive}
+          recording={recording}
+          onStart={onStart}
+          onStop={onStop}
+          inputValue={inputValue}
+        />
+        {/* Mostra il testo trascritto solo se presente */}
+        {responseText && (
+          <div className="w-full text-xs text-blue-700 dark:text-blue-300 mt-2 px-2">
+            <b>Testo interpretato:</b> {responseText}
+          </div>
+        )}
+      </form>
     </ComposerPrimitive.Root>
   );
 };
 
-const ComposerAction: FC<{ onVoiceClick?: () => void; voiceActive?: boolean; recording?: boolean; onStart?: () => void; onStop?: () => void; }> = ({ onVoiceClick, voiceActive, recording }) => {
+const ComposerAction: FC<{ onVoiceClick?: () => void; voiceActive?: boolean; recording?: boolean; onStart?: () => void; onStop?: () => void; inputValue: string; }> = ({ onVoiceClick, voiceActive, recording, inputValue }) => {
   return (
     <>
       <TooltipIconButton
@@ -237,19 +402,23 @@ const ComposerAction: FC<{ onVoiceClick?: () => void; voiceActive?: boolean; rec
           ${recording ? 'scale-110 ring-2 ring-primary shadow-lg' : 'shadow-xs'}
           bg-primary text-primary-foreground hover:bg-primary/90 mr-2`}
         style={{ transform: recording ? 'scale(1.10)' : 'scale(1)' }}
+        type="button"
       >
         <MicIcon className={`size-5 transition-all duration-300`} />
       </TooltipIconButton>
       <ThreadPrimitive.If running={false}>
-        <ComposerPrimitive.Send asChild>
+        {/* <ComposerPrimitive.Send asChild> */}
           <TooltipIconButton
             tooltip="Send"
             variant="default"
             className="my-2.5 size-8 p-2 transition-opacity ease-in"
+            type="submit"
+            disabled={!inputValue.trim()}
+            tabIndex={0}
           >
             <SendHorizontalIcon />
           </TooltipIconButton>
-        </ComposerPrimitive.Send>
+        {/* </ComposerPrimitive.Send> */}
       </ThreadPrimitive.If>
       <ThreadPrimitive.If running>
         <ComposerPrimitive.Cancel asChild>
@@ -384,6 +553,7 @@ const BranchPicker: FC<BranchPickerPrimitive.Root.Props> = ({
   );
 };
 
+// Sposto qui la dichiarazione per evitare errori di utilizzo prima della definizione
 const CircleStopIcon = () => {
   return (
     <svg

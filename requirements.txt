@@ -1,0 +1,52 @@
+# requirements.txt
+# Dipendenze principali per il backend dell'Agent Conversazionale
+
+# FastAPI per il backend web
+fastapi
+
+# Server ASGI per eseguire FastAPI
+uvicorn
+
+# Per la gestione di file audio (lettura/scrittura)
+pydub
+
+# Per la trascrizione vocale (Speech-to-Text)
+openai-whisper
+
+# Per Text-to-Speech (puoi usare pyttsx3 o gTTS, scegli quello che preferisci)
+gtts
+
+# Per la gestione di file audio in formato WAV/MP3
+soundfile
+
+# Per la gestione di richieste HTTP (se necessario)
+requests
+
+# Per CORS (Cross-Origin Resource Sharing)
+fastapi[all]
+
+# Per la manipolazione di array audio
+numpy
+
+# Per la gestione di file temporanei
+python-multipart
+
+# Se usi OpenAI API per GPT o Whisper
+openai
+
+# Se usi PyTorch (necessario per Whisper)
+torch
+
+# Se usi modelli HuggingFace
+transformers
+
+# --- Fine dipendenze ---
+
+# Spiegazione:
+# - fastapi, uvicorn: backend API
+# - openai-whisper, torch: trascrizione vocale
+# - gtts: sintesi vocale (TTS)
+# - pydub, soundfile, numpy: manipolazione file audio
+# - requests: chiamate HTTP a servizi esterni
+# - python-multipart: upload file audio
+# - transformers: modelli NLP opzionali
