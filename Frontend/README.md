@@ -1,25 +1,43 @@
-This is the [assistant-ui](https://github.com/Yonom/assistant-ui) starter project.
+# Conversational Agent – Frontend
 
-## Getting Started
+This folder contains the React/Next.js frontend for the Conversational Agent project. It provides a modern, responsive user interface for interacting with the backend AI assistant.
 
-First, add your OpenAI API key to `.env.local` file:
+## Main Technologies
+- React 18
+- Next.js 14
+- TypeScript
+- Tailwind CSS
+- Custom Assistant UI components
 
+## Features
+- Real-time chat interface with AI assistant
+- Voice chat support (recording, TTS)
+- Modern, accessible UI/UX
+- Customizable message rendering
+
+## Installation
+```powershell
+# From this folder
+npm install
 ```
-OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
 
-Then, run the development server:
-
-```bash
+## Development
+```powershell
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Project Structure
+- `app/` – Next.js app directory (routing, pages, API)
+- `components/assistant-ui/` – Custom assistant UI components (chat, voice, markdown)
+- `components/ui/` – Shared UI elements (buttons, tooltips)
+- `lib/` – Utility functions
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Configuration
+- Update API endpoints in the code if your backend runs on a different host/port.
+
+## Notes
+- For backend setup, see the `Backend/` folder.
+
+---
+
+© 2025 – Internship Project

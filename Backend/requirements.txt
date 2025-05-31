@@ -1,0 +1,11 @@
+dateparser==1.2.1
+fastapi==0.115.12
+gTTS==2.5.4
+langchain-core==0.3.63
+langchain-openai==0.3.18
+langgraph==0.4.7
+pydantic==2.11.5
+pydub==0.25.1
+requests==2.32.3
+SpeechRecognition==3.14.3
+typing_extensions==4.13.2
