@@ -185,6 +185,35 @@ def parse_date(user_input: str) -> str | None:
         processed_input = re.sub(r"\b(alle|ore)\s+(\d{1,2}:\d{2})", r"\2", processed_input, flags=re.IGNORECASE)
         logger.info(f"parse_date: Input='{user_input}', Processed='{processed_input}'")
 
+        # Impostazioni per il parsing delle date - SPOSTATO QUI
+        settings = {
+            'PREFER_DATES_FROM': 'future',
+            'TIMEZONE': 'Europe/Rome',
+            'RETURN_AS_TIMEZONE_AWARE': True,
+            # 'DATE_ORDER': 'DMY' # Verrà impostato condizionatamente
+            'RELATIVE_BASE': datetime.datetime.now(),  # Usa data e ora attuali del computer
+        }
+        languages = ['it', 'en']
+
+        # --- Pre-processing per espressioni tipo "mercoledì prossimo" ---
+        giorni_settimana = {
+            "lunedì": 0, "martedì": 1, "mercoledì": 2, "giovedì": 3,
+            "venerdì": 4, "sabato": 5, "domenica": 6
+        }
+        for nome_giorno, idx in giorni_settimana.items():
+            pattern = rf"{nome_giorno} prossimo"
+            if re.search(pattern, processed_input):
+                base = settings["RELATIVE_BASE"]
+                # Calcola il prossimo giorno della settimana
+                days_ahead = idx - base.weekday()
+                if days_ahead <= 0:
+                    days_ahead += 7
+                next_day = base + datetime.timedelta(days=days_ahead)
+                # Sostituisci "mercoledì prossimo" con la data calcolata (formato italiano)
+                processed_input = re.sub(pattern, next_day.strftime("%d/%m/%Y"), processed_input)
+                logger.debug(f"parse_date: Sostituito '{nome_giorno} prossimo' con '{next_day.strftime('%d/%m/%Y')}' -> '{processed_input}'")
+                break
+
         # Controlla se l'input contiene un orario specifico
         time_pattern = r'\b\d{1,2}:\d{2}\b'
         time_specified_in_input = bool(re.search(time_pattern, processed_input))
@@ -197,15 +226,6 @@ def parse_date(user_input: str) -> str | None:
         if not time_specified_in_input and re.search(r"\b(alle|ore)\s+\d", original_input_lower):
             time_specified_in_input = True
         logger.debug(f"parse_date: Orario specificato? {time_specified_in_input}")
-
-        # Impostazioni per il parsing delle date
-        settings = {
-            'PREFER_DATES_FROM': 'future',
-            'TIMEZONE': 'Europe/Rome',
-            'RETURN_AS_TIMEZONE_AWARE': True,
-            # 'DATE_ORDER': 'DMY' # Verrà impostato condizionatamente
-        }
-        languages = ['it', 'en']
 
         # Controlla se processed_input (ciò che vedrà dateparser) assomiglia a una data ISO.
         # Regex per YYYY-MM-DD[Tt]HH:MM:SS (con opzionali frazioni di secondo e timezone)
@@ -566,7 +586,8 @@ def create_reservation(session_token: str, user_id: str, startDateTime: str, end
             start_formatted = start_dt_parsed.strftime('%d/%m/%Y alle %H:%M') if start_dt_parsed else startDateTime
             return (f"✅ {message}\n"
                     f"Prenotazione per la risorsa {resourceId} il {start_formatted}.\n"
-                    f"**Numero di riferimento:** **{ref_num}**")
+                    f"Numero di riferimento: {ref_num}\n"
+                    f"Conserva questo numero: ti servirà per cancellare o modificare la prenotazione.")
         else:
             logger.warning("create_reservation: Prenotazione creata ma il numero di riferimento è vuoto.")
             return f"⚠️ {message} (Attenzione: numero di riferimento non ricevuto)."
@@ -872,6 +893,12 @@ Segui scrupolosamente le condizioni d'uso di ciascuno strumento.
 - Chiedi chiarimenti se le informazioni fornite dall'utente sono insufficienti (es. data/ora non chiara, risorsa non specificata quando necessario).
 - Gestisci gli errori dei tool e informa l'utente in modo appropriato.
 - Ricorda di autenticarti (`authenticate_tool`) quando necessario.
+
+**Gestione del Contesto Temporale:**
+- Quando l'utente fa una richiesta che dipende da una data e/o ora discussa in precedenza (ad esempio, chiede di prenotare una sala specifica dopo aver verificato la disponibilità per un certo orario), **DEVI** riutilizzare la data e l'ora esatta (in formato ISO 8601) che è stata precedentemente determinata tramite lo strumento `parse_date` e presente nella cronologia della conversazione.
+- Non re-interpretare frasi come "domani" se il "domani" è già stato risolto in una data ISO specifica. Usa sempre il risultato ISO 8601 più recente e rilevante di `parse_date` per le azioni successive che richiedono una data/ora.
+- Se l'utente non specifica una nuova data/ora esplicita per un'azione, assumi che si riferisca al contesto temporale più recente stabilito nella conversazione e utilizza la corrispondente data/ora ISO 8601 precedentemente parsata.
+- Per il campo `endDateTime` dello strumento `create_reservation`, calcolalo sempre aggiungendo 1 ora allo `startDateTime` che hai determinato.
 """
 
 # Crea l'agente ReAct con le istruzioni di sistema modificate
@@ -999,7 +1026,7 @@ def should_auto_book(state: State) -> str:
         return "continue_normally"
 
     # 3. Controlla se l'agente sta per dare una risposta testuale (la lista)
-    # Se l'ultimo messaggio è un AIMessage con contenuto e senza tool_calls, è probabile.
+    # Se l'ultimo messaggio è un AIMessage con contenuto, o l'ultimissimo ToolMessage
     if isinstance(messages[-1], AIMessage) and messages[-1].content and not messages[-1].tool_calls:
         if "disponibil" in messages[-1].content.lower() and ("✅" in messages[-1].content or "❌" in messages[-1].content):
             logging.debug("should_auto_book: L'agente sta per presentare una lista di disponibilità.")
@@ -1197,9 +1224,9 @@ def main():
         print(" Autenticazione riuscita!")
         logging.info(f"Token iniziale: {current_session_token[:5]}..., UserID: {current_user_id}")
 
-    
-
-        
+        # Messaggio di benvenuto
+        welcome_message = AIMessage(content="Benvenuto nel sistema di prenotazione risorse. Come posso aiutarti oggi?")
+        message_history.append(welcome_message) # Aggiungi alla cronologia messaggi
 
         # Inizia il loop interazione
         while True:

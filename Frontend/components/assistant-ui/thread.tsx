@@ -34,6 +34,10 @@ export const Thread: FC = () => {
   const [messages, setMessages] = React.useState<{ role: string; content: string }[]>([]);
   // Stato per il valore della textarea
   const [inputValue, setInputValue] = React.useState("");
+  // Stato per mostrare il loader di caricamento (sia per voce che testo)
+  const [isLoading, setIsLoading] = React.useState(false);
+  const [isAudioPlaying, setIsAudioPlaying] = React.useState(false);
+  const audioRef = React.useRef<HTMLAudioElement | null>(null);
 
   // Funzione per aggiungere un messaggio utente
   const addUserMessage = React.useCallback((message: string) => {
@@ -70,20 +74,14 @@ export const Thread: FC = () => {
   const handleSend = React.useCallback(async (message?: string, isFromVoice: boolean = false) => {
     let msgToProcess = message !== undefined ? message : inputValue;
     msgToProcess = cleanTextForProcessing(msgToProcess);
-    console.log("[handleSend] Initial 'messages' state before this send:", JSON.stringify(messages, null, 2));
-    console.log("[handleSend] Attempting to send message:", msgToProcess);
-
     if (msgToProcess.trim() !== "") {
-      setInputValue(""); // Svuota la textarea
-      setResponseText(null); // Nasconde il testo trascritto
-
-      // Aggiorna subito la UI con il messaggio utente
+      setInputValue("");
+      setResponseText(null);
+      setIsLoading(true);
       setMessages(prev => {
         const updated = [...prev, { role: "user", content: msgToProcess }];
-        console.log("[handleSend] Stato aggiornato (user message):", updated);
         return updated;
       });
-
       try {
         // Costruisci la history includendo il messaggio appena aggiunto
         const currentMessagesSnapshot = [
@@ -111,13 +109,8 @@ export const Thread: FC = () => {
             messages: limitedHistory
           }),
         });
-        console.log("[handleSend] User message added to UI state (after history construction).");
-
-        console.log("[handleSend] Backend response status:", chatRes.status);
         if (chatRes.ok) {
           const chatData = await chatRes.json();
-          console.log("[handleSend] Backend response data:", JSON.stringify(chatData, null, 2));
-
           // Estrai il messaggio dell'assistente
           let assistantContent = null;
           if (chatData && Array.isArray(chatData.messages)) {
@@ -129,15 +122,8 @@ export const Thread: FC = () => {
               assistantContent = agentMsgObj.content;
             }
           }
-
           if (assistantContent) {
-            console.log("[handleSend] Assistant message found:", assistantContent);
-            setMessages(prev => {
-              const updated = [...prev, { role: "assistant", content: assistantContent }];
-              console.log("[handleSend] Stato aggiornato (assistant message):", updated);
-              return updated;
-            });
-            // TTS per la risposta assistente
+            // 1. Prima fetch TTS
             try {
               const ttsRes = await fetch("http://localhost:8000/agent/tts", {
                 method: "POST",
@@ -147,40 +133,49 @@ export const Thread: FC = () => {
               if (ttsRes.ok) {
                 const audioBlob = await ttsRes.blob();
                 const audioUrl = URL.createObjectURL(audioBlob);
+                // 2. Solo ora mostra il messaggio assistant nel DOM
+                setMessages(prev => {
+                  const updated = [...prev, { role: "assistant", content: assistantContent }];
+                  return updated;
+                });
+                // 3. Avvia la riproduzione
                 const audio = new Audio(audioUrl);
                 audio.play().catch(e => console.error("Error playing TTS audio for assistant:", e));
                 audio.onended = () => URL.revokeObjectURL(audioUrl);
+              } else {
+                setMessages(prev => {
+                  const updated = [...prev, { role: "assistant", content: assistantContent }];
+                  return updated;
+                });
               }
             } catch (ttsErr) {
+              setMessages(prev => {
+                const updated = [...prev, { role: "assistant", content: assistantContent }];
+                return updated;
+              });
               console.error("[Thread] Error during TTS fetch operation for assistant response:", ttsErr);
             }
           } else {
-            console.warn("[handleSend] No valid assistant message content found in response:", chatData);
             setMessages(prev => {
               const updated = [...prev, { role: "error", content: "L'assistente ha risposto, ma il formato del messaggio non è stato riconosciuto. Dati: " + JSON.stringify(chatData).substring(0, 200) + "..." }];
-              console.log("[handleSend] Stato aggiornato (error message):", updated);
               return updated;
             });
           }
         } else {
           const errText = await chatRes.text();
-          console.error("[handleSend] Backend error response:", errText);
           setMessages(prev => {
             const updated = [...prev, { role: "error", content: "Errore dal backend: " + errText }];
-            console.log("[handleSend] Stato aggiornato (backend error):", updated);
             return updated;
           });
         }
       } catch (err: any) {
         setMessages(prev => {
           const updated = [...prev, { role: "error", content: "Errore di rete: " + (err?.message || err) }];
-          console.log("[handleSend] Stato aggiornato (network error):", updated);
           return updated;
         });
-        console.error("[handleSend] Network or other error:", err);
+      } finally {
+        setIsLoading(false);
       }
-    } else {
-      console.log("[handleSend] Message is empty, not sending.");
     }
   }, [inputValue, messages, addUserMessage, addAssistantMessage, addErrorMessage]);
 
@@ -238,13 +233,33 @@ export const Thread: FC = () => {
           }
           return null;
         })}
+        {/* Se non ci sono ancora messaggi assistant, mostra il loader in fondo */}
+        {/* Loader in fondo rimosso: ora il loader compare solo al posto del Composer (input) */}
 
         <ThreadPrimitive.If empty={false}>
           <div className="min-h-8 flex-grow" />
         </ThreadPrimitive.If>
 
-        <div className="sticky bottom-0 mt-3 flex w-full max-w-[var(--thread-max-width)] flex-col items-center justify-end rounded-t-lg bg-inherit pb-4">
+        <div className="sticky bottom-0 mt-3 flex w-full max-w-[var(--thread-max-width)] flex-col items-start justify-end rounded-t-lg bg-inherit pb-4 pl-2">
           <ThreadScrollToBottom />
+          {isLoading && (
+            <div className="flex justify-start w-full items-center gap-3">
+              <div className="bg-white/90 dark:bg-zinc-900/80 shadow-lg rounded-full p-2 flex flex-col items-center animate-fade-in-up transition-all duration-700 mt-2 mb-1 min-w-[56px] min-h-[56px] max-w-[56px] max-h-[56px] justify-center">
+                <div className="bg-blue-100 dark:bg-blue-900 rounded-full p-1 relative flex items-center justify-center w-8 h-8">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="12" cy="12" r="12" fill="#2563eb" fillOpacity="0.15" />
+                    <path d="M12 7a3 3 0 0 1 3 3v1a3 3 0 0 1-6 0v-1a3 3 0 0 1 3-3zm0 10c-2.67 0-8 1.34-8 4v1h16v-1c0-2.66-5.33-4-8-4z" fill="#2563eb" />
+                  </svg>
+                  {/* Spinner sopra l'avatar */}
+                  <svg className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 animate-spin" width="16" height="16" viewBox="0 0 24 24">
+                    <circle className="opacity-20" cx="12" cy="12" r="7" stroke="#2563eb" strokeWidth="3" fill="none" />
+                    <path className="opacity-80" fill="#2563eb" d="M4 12a8 8 0 0 1 8-8v2z" />
+                  </svg>
+                </div>
+              </div>
+              <span className="text-sm font-medium text-blue-700 dark:text-blue-300 animate-pulse ml-1">Sto elaborando...</span>
+            </div>
+          )}
           <Composer
             onVoiceClick={() => {
               setShowVoiceChat((v) => {
@@ -261,6 +276,7 @@ export const Thread: FC = () => {
             inputValue={inputValue}
             setInputValue={setInputValue}
             onSend={() => handleSend()}
+            disabled={isAudioPlaying}
           />
         </div>
       </ThreadPrimitive.Viewport>
@@ -326,16 +342,7 @@ const ThreadWelcome: FC = () => {
 const ThreadWelcomeSuggestions: FC = () => {
   return (
     <div className="mt-3 flex w-full items-stretch justify-center gap-4">
-      <ThreadPrimitive.Suggestion
-        className="hover:bg-muted/80 flex max-w-sm grow basis-0 flex-col items-center justify-center rounded-lg border p-3 transition-colors ease-in"
-        prompt="Prenotami una sala per domani"
-        method="replace"
-        autoSend
-      >
-        <span className="line-clamp-2 text-ellipsis text-sm font-semibold">
-          Prenota una sala per domani
-        </span>
-      </ThreadPrimitive.Suggestion>
+
 
     </div>
   );
@@ -352,14 +359,15 @@ const Composer: FC<{
   inputValue: string;
   setInputValue: (v: string) => void;
   onSend: () => void;
-}> = ({ onVoiceClick, voiceActive, recording, onStart, onStop, responseText, inputValue, setInputValue, onSend }) => {
+  disabled?: boolean;
+}> = ({ onVoiceClick, voiceActive, recording, onStart, onStop, responseText, inputValue, setInputValue, onSend, disabled }) => {
   return (
     <ComposerPrimitive.Root asChild>
       <form
         className="focus-within:border-ring/20 flex w-full flex-wrap items-end rounded-lg border bg-inherit px-2.5 shadow-sm transition-colors ease-in"
         onSubmit={e => {
           e.preventDefault();
-          onSend();
+          if (!disabled) onSend();
         }}
       >
         <ComposerPrimitive.Input
@@ -370,14 +378,14 @@ const Composer: FC<{
           value={inputValue}
           onChange={e => setInputValue(e.target.value)}
           name="input"
+          disabled={disabled}
         />
         <ComposerAction
           onVoiceClick={onVoiceClick}
           voiceActive={voiceActive}
           recording={recording}
-          onStart={onStart}
-          onStop={onStop}
           inputValue={inputValue}
+          disabled={disabled}
         />
         {/* Mostra il testo trascritto solo se presente */}
         {responseText && (
@@ -390,7 +398,7 @@ const Composer: FC<{
   );
 };
 
-const ComposerAction: FC<{ onVoiceClick?: () => void; voiceActive?: boolean; recording?: boolean; onStart?: () => void; onStop?: () => void; inputValue: string; }> = ({ onVoiceClick, voiceActive, recording, inputValue }) => {
+const ComposerAction: FC<{ onVoiceClick?: () => void; voiceActive?: boolean; recording?: boolean; onStart?: () => void; onStop?: () => void; inputValue: string; disabled?: boolean; }> = ({ onVoiceClick, voiceActive, recording, inputValue, disabled }) => {
   return (
     <>
       <TooltipIconButton
@@ -403,21 +411,22 @@ const ComposerAction: FC<{ onVoiceClick?: () => void; voiceActive?: boolean; rec
           bg-primary text-primary-foreground hover:bg-primary/90 mr-2`}
         style={{ transform: recording ? 'scale(1.10)' : 'scale(1)' }}
         type="button"
+        disabled={disabled}
       >
         <MicIcon className={`size-5 transition-all duration-300`} />
       </TooltipIconButton>
       <ThreadPrimitive.If running={false}>
         {/* <ComposerPrimitive.Send asChild> */}
-          <TooltipIconButton
-            tooltip="Send"
-            variant="default"
-            className="my-2.5 size-8 p-2 transition-opacity ease-in"
-            type="submit"
-            disabled={!inputValue.trim()}
-            tabIndex={0}
-          >
-            <SendHorizontalIcon />
-          </TooltipIconButton>
+        <TooltipIconButton
+          tooltip="Send"
+          variant="default"
+          className="my-2.5 size-8 p-2 transition-opacity ease-in"
+          type="submit"
+          disabled={!inputValue.trim() || disabled}
+          tabIndex={0}
+        >
+          <SendHorizontalIcon />
+        </TooltipIconButton>
         {/* </ComposerPrimitive.Send> */}
       </ThreadPrimitive.If>
       <ThreadPrimitive.If running>

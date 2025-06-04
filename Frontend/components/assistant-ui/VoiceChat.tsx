@@ -15,8 +15,10 @@ const VoiceChat: React.FC<{
     const autoStopTimerRef = useRef<NodeJS.Timeout | null>(null);
     const processingStopRef = useRef(false);
     const [audioUrl, setAudioUrl] = useState<string | null>(null);
+    const [processingAudio, setProcessingAudio] = useState(false);
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunks = useRef<Blob[]>([]);
+    const speechRecognitionRef = useRef<any>(null);
 
     // Avvia la registrazione
     const startRecording = async () => {
@@ -35,6 +37,36 @@ const VoiceChat: React.FC<{
             const mediaRecorder = new MediaRecorder(stream);
             mediaRecorderRef.current = mediaRecorder;
             audioChunks.current = [];
+
+            // --- INTEGRAZIONE SPEECH RECOGNITION ---
+            const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+            if (SpeechRecognition) {
+                const recognition = new SpeechRecognition();
+                recognition.continuous = false;
+                recognition.interimResults = false;
+                recognition.lang = 'it-IT';
+                recognition.onstart = () => {
+                    console.log('SpeechRecognition: started');
+                };
+                recognition.onspeechend = () => {
+                    console.log('SpeechRecognition: speech ended, stopping MediaRecorder');
+                    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+                        mediaRecorderRef.current.stop();
+                    }
+                    recognition.stop();
+                };
+                recognition.onend = () => {
+                    console.log('SpeechRecognition: ended');
+                };
+                recognition.onerror = (event: any) => {
+                    console.warn('SpeechRecognition: error', event);
+                };
+                speechRecognitionRef.current = recognition;
+                recognition.start();
+            } else {
+                console.warn('SpeechRecognition API non supportata su questo browser.');
+            }
+            // --- FINE INTEGRAZIONE SPEECH RECOGNITION ---
 
             mediaRecorder.onstart = () => {
                 console.log("VoiceChat: MediaRecorder started.");
@@ -74,7 +106,8 @@ const VoiceChat: React.FC<{
                     formData.append("file", audioBlob, "audio.webm");
                     try {
                         console.log("VoiceChat: Sending audio to backend for transcription...");
-                        if (onAudioSendToBackend) onAudioSendToBackend(); // CHIAMA LA CALLBACK
+                        if (onAudioSendToBackend) onAudioSendToBackend();
+                        setProcessingAudio(true);
                         const res = await fetch("http://localhost:8000/agent/audio", {
                             method: "POST",
                             body: formData,
@@ -118,13 +151,14 @@ const VoiceChat: React.FC<{
             };
 
             mediaRecorder.start();
-            // Stop automatico dopo 5 secondi
+
+            // Stop automatico dopo 30 secondi
             autoStopTimerRef.current = setTimeout(() => {
                 if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-                    console.log("VoiceChat: Auto-stopping after 10 seconds");
+                    console.log("VoiceChat: Auto-stopping after 30 seconds");
                     mediaRecorderRef.current.stop();
                 }
-            }, 10000);
+            }, 30000);
         } catch (err) {
             console.error("VoiceChat: Error starting recording (getUserMedia or MediaRecorder setup):", err);
             setResponseText("Errore nell'accesso al microfono o nella registrazione.");
@@ -146,7 +180,21 @@ const VoiceChat: React.FC<{
         } else {
             console.log("VoiceChat: Attempted to stop recording, but state was not 'recording'.");
         }
+        // Ferma anche lo SpeechRecognition se ancora attivo
+        if (speechRecognitionRef.current) {
+            try { speechRecognitionRef.current.stop(); } catch { }
+            speechRecognitionRef.current = null;
+        }
     };
+
+    // --- GESTIONE LOADER ELABORAZIONE AUDIO ---
+    // Attiva loader quando si invia audio al backend
+    React.useEffect(() => {
+        if (!recording && processingAudio) {
+            // Se non stiamo più registrando e il loader è attivo, resetta dopo ricezione testo
+            if (responseText) setProcessingAudio(false);
+        }
+    }, [recording, responseText]);
 
     React.useEffect(() => {
         console.log("VoiceChat: useEffect triggered. recording prop:", recording);
@@ -169,7 +217,23 @@ const VoiceChat: React.FC<{
     }, [recording]);
 
     // NON renderizzare nulla!
-    return null;
+    return (
+        <>
+            {processingAudio && !responseText && (
+                <div className="flex justify-start w-full items-center gap-3 mt-2 mb-1">
+                    <div className="bg-white/90 dark:bg-zinc-900/80 shadow-lg rounded-full p-2 flex flex-col items-center animate-fade-in-up transition-all duration-700 min-w-[56px] min-h-[56px] max-w-[56px] max-h-[56px] justify-center">
+                        <div className="bg-blue-100 dark:bg-blue-900 rounded-full p-1 relative flex items-center justify-center w-8 h-8">
+                            <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24">
+                                <circle className="opacity-20" cx="12" cy="12" r="7" stroke="#2563eb" strokeWidth="3" fill="none" />
+                                <path className="opacity-80" fill="#2563eb" d="M4 12a8 8 0 018-8v2z" />
+                            </svg>
+                        </div>
+                    </div>
+                    <span className="text-sm font-medium text-blue-700 dark:text-blue-300 animate-pulse ml-1">Sto trascrivendo l'audio...</span>
+                </div>
+            )}
+        </>
+    );
 };
 
 export default VoiceChat;

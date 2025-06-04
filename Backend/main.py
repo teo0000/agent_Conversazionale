@@ -8,6 +8,7 @@ import logging
 from pydub import AudioSegment
 import os
 from fastapi.middleware.cors import CORSMiddleware
+import re # Aggiunto per la pulizia del testo
 from fastapi.responses import StreamingResponse # Aggiunto per TTS
 
 app = FastAPI()
@@ -103,7 +104,12 @@ async def text_to_speech_endpoint(request: Request):
         if not text_to_speak:
             return JSONResponse({"error": "Nessun testo fornito per la sintesi vocale."}, status_code=400)
 
-        tts = gTTS(text_to_speak, lang="it")
+        # Pulisci il testo dal Markdown prima di inviarlo a gTTS
+        cleaned_text = re.sub(r'\*\*(.*?)\*\*', r'\1', text_to_speak) # Rimuove **testo** -> testo
+        # Se usi anche asterischi singoli per il corsivo e vuoi rimuoverli:
+        # cleaned_text = re.sub(r'\*(.*?)\*', r'\1', cleaned_text)
+
+        tts = gTTS(text=cleaned_text, lang="it")
         audio_fp = io.BytesIO()
         tts.write_to_fp(audio_fp)
         audio_fp.seek(0) # Torna all'inizio del buffer di byte
