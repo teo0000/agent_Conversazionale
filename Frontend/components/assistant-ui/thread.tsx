@@ -36,8 +36,9 @@ export const Thread: FC = () => {
   const [inputValue, setInputValue] = React.useState("");
   // Stato per mostrare il loader di caricamento (sia per voce che testo)
   const [isLoading, setIsLoading] = React.useState(false);
+  // Stato per la riproduzione audio TTS
   const [isAudioPlaying, setIsAudioPlaying] = React.useState(false);
-  const audioRef = React.useRef<HTMLAudioElement | null>(null);
+  const ttsAudioRef = React.useRef<HTMLAudioElement | null>(null);
 
   // Funzione per aggiungere un messaggio utente
   const addUserMessage = React.useCallback((message: string) => {
@@ -70,8 +71,20 @@ export const Thread: FC = () => {
   const handleStart = () => setRecording(true);
   const handleStop = () => setRecording(false);
 
+  // Funzione per fermare la riproduzione audio TTS
+  const stopTTS = React.useCallback(() => {
+    if (ttsAudioRef.current) {
+      ttsAudioRef.current.pause();
+      ttsAudioRef.current.currentTime = 0;
+      setIsAudioPlaying(false);
+      ttsAudioRef.current = null;
+    }
+  }, []);
+
   // Funzione per inviare il messaggio (sia da testo che da voce)
   const handleSend = React.useCallback(async (message?: string, isFromVoice: boolean = false) => {
+    // Interrompi la riproduzione TTS se attiva
+    stopTTS();
     let msgToProcess = message !== undefined ? message : inputValue;
     msgToProcess = cleanTextForProcessing(msgToProcess);
     if (msgToProcess.trim() !== "") {
@@ -140,8 +153,14 @@ export const Thread: FC = () => {
                 });
                 // 3. Avvia la riproduzione
                 const audio = new Audio(audioUrl);
+                ttsAudioRef.current = audio;
+                setIsAudioPlaying(true);
                 audio.play().catch(e => console.error("Error playing TTS audio for assistant:", e));
-                audio.onended = () => URL.revokeObjectURL(audioUrl);
+                audio.onended = () => {
+                  setIsAudioPlaying(false);
+                  URL.revokeObjectURL(audioUrl);
+                  ttsAudioRef.current = null;
+                };
               } else {
                 setMessages(prev => {
                   const updated = [...prev, { role: "assistant", content: assistantContent }];
@@ -177,7 +196,7 @@ export const Thread: FC = () => {
         setIsLoading(false);
       }
     }
-  }, [inputValue, messages, addUserMessage, addAssistantMessage, addErrorMessage]);
+  }, [inputValue, messages, addUserMessage, addAssistantMessage, addErrorMessage, stopTTS]);
 
   // Quando la trascrizione è pronta, invia il messaggio e resetta la textarea SOLO dopo l'invio
   const handleVoiceChatStop = (text?: string) => {

@@ -9,19 +9,21 @@ from langgraph.graph.message import add_messages
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field  # Assicurati che sia la versione corretta per la tua installazione
+import dateutil.tz
 from langgraph.prebuilt import create_react_agent
 import dateparser
 import json
 import logging
 import datetime
 import pprint
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
 import sys
+import uuid # Aggiunto per generare ID univoci più brevi
 import io
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 # Configura il logging
-logging.basicConfig(level=logging.DEBUG)  # Cambiato a INFO per meno verbosità, DEBUG se necessario
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')  # Cambiato a INFO per meno verbosità, DEBUG se necessario
 logger = logging.getLogger(__name__)  # Logger specifico per questo modulo
 
 # Imposta la chiave API OpenAI
@@ -44,6 +46,14 @@ class State(TypedDict):
     confirmation_pending: bool = False
     # Campo per la logica di prenotazione automatica
     auto_book_target: Optional[Dict[str, str]] = None
+    available_accessories: Optional[List[Dict[str, Any]]] = None
+    # Nuovi campi di stato per il flusso guidato
+    needs_initial_accessories_check: bool = False # Indipendente dalla richiesta utente
+    availability_check_done: bool = False # Nuovo flag
+    details_asked: bool = False # Nuovo flag
+    # Nuovi campi per il flusso di aggiornamento post-creazione
+    awaiting_accessories_update: bool = False
+    last_created_ref: Optional[str] = None
 
 # 🔑 Funzione di Autenticazione (Helper)
 def authenticate(username: str, password: str) -> dict:
@@ -237,7 +247,7 @@ def parse_date(user_input: str) -> str | None:
             # Se non è una data/datetime ISO stretta, potrebbe essere "DD/MM/YYYY" o linguaggio naturale.
             # In questi casi, specialmente per l'italiano "DD/MM/YYYY", DMY è preferito.
             settings['DATE_ORDER'] = 'DMY'
-            logger.debug(f"parse_date: Input '{processed_input}' non è ISO stretto. Usando DATE_ORDER: DMY.")
+            logger.debug(f"parse_date: Input '{processed_input}' non è ISO stretta. Usando DATE_ORDER: DMY.")
         else:
             logger.debug(f"parse_date: Input '{processed_input}' sembra ISO. Non usando DATE_ORDER esplicito.")
 
@@ -262,8 +272,11 @@ def parse_date(user_input: str) -> str | None:
             logger.warning(f"parse_date: La data '{target_date}' è nel passato. Ignorata.")
             return None
 
+        # Converti la data in UTC per garantire coerenza con l'API
+        utc_date = target_date.astimezone(datetime.timezone.utc)
+
         # Restituisci il risultato in formato JSON
-        iso_string = target_date.isoformat()
+        iso_string = utc_date.isoformat()
         result = {"iso_datetime": iso_string, "time_specified": time_specified_in_input}
         json_output = json.dumps(result)
         logger.info(f"parse_date: Output JSON='{json_output}'")
@@ -308,225 +321,6 @@ def get_resources(session_token: str, user_id: str) -> list | str:
         logger.error(f"❌ Errore imprevisto elaborazione risorse: {e}", exc_info=True)
         return "❌ Errore interno elaborazione risorse."
 
-# --- Tool: get_availability (VERSIONE CORRETTA) ---
-# class GetAvailabilityArgs(BaseModel):
-#     session_token: str = Field(..., description="The valid session token obtained from authentication.")
-#     user_id: str = Field(..., description="The valid user ID obtained from authentication.")
-#     resource_id: str = Field(..., description="The **specific** ID of the resource (obtained from `get_resources` or the conversation) to check availability for.")
-#     dateTime: str = Field(..., description="The **EXACT ISO 8601 date/time WITH TIME SPECIFIED** to check availability for (obtained from `parse_date` where `time_specified` is `true`).")
-# @tool(args_schema=GetAvailabilityArgs)
-# def get_availability(session_token: str, user_id: str, resource_id: str, dateTime: str) -> str:
-#     """
-#     Checks the availability of **A SINGLE** specific resource for **A SINGLE** precise ISO 8601 date/time **(with time)**.
-
-#     **MANDATORY USAGE CONDITIONS:**
-#     1.  **CALL `parse_date` FIRST:** You must have the ISO 8601 string from `parse_date`.
-#     2.  **CHECK `time_specified`:** Call this tool **ONLY IF** `parse_date` returned `time_specified: true`. If it's `false`, **DO NOT CALL THIS TOOL**, but ask the user to specify a time.
-#     3.  **CHECK `resource_id`:** Call this tool **ONLY IF** you have a specific `resource_id`.
-#         *   If the user specified a resource, use that ID.
-#         *   If the user did NOT specify a resource, **DO NOT CALL THIS TOOL DIRECTLY FOR ALL RESOURCES**. Instead:
-#             a) Call `get_resources` to get the list [ {resourceId: '1', name: 'Room A'}, ... ].
-#             b) **Call THIS TOOL (`get_availability`) REPEATEDLY**, once for each `resourceId` in the list, always using the same precise `dateTime`.
-#     **OUTPUT:**
-#     **HOW TO USE THE OUTPUT (IN THE FINAL SUMMARY TO THE USER):**
-#     - If available (✅): Indicate "Available".
-#     - If NOT available (❌) with next availability: Indicate "Not available (next avail. [Date/Time])".
-#     - If NOT available (❌) without next availability: Indicate "Not available".
-#     """
-#     if not all([session_token, user_id, resource_id, dateTime]):
-#         return "❌ Error: Missing token, user ID, resource ID, or date/time for verification."
-
-#     # --- Input validation ---
-#     if not resource_id.isdigit():
-#         logging.error(f"get_availability: Invalid resource_id '{resource_id}'. Must be a digit.")
-#         return f"❌ Error: Invalid resource ID '{resource_id}'. It must be a number."
-#     try:
-#         # Basic check if dateTime looks like ISO 8601
-#         datetime.datetime.fromisoformat(dateTime.replace('Z', '+00:00'))
-#     except ValueError:
-#         logging.error(f"get_availability: Invalid dateTime format '{dateTime}'. Must be ISO 8601.")
-#         return f"❌ Error: Invalid date/time format '{dateTime}'. Expected ISO 8601."
-#     # --- End Input validation ---
-
-
-#     try:
-#         # Check if called for midnight, might indicate missing time specification logic
-#         dt_obj = dateparser.parse(dateTime)
-#         if dt_obj and dt_obj.hour == 0 and dt_obj.minute == 0 and dt_obj.second == 0 and dt_obj.microsecond == 0:
-#              logging.warning(f"get_availability called for midnight ({dateTime}). Verify if time was specified by user and parse_date logic is correct.")
-#     except Exception:
-#         pass # Ignore parsing errors here, main call handles it
-
-#     headers = {"X-Booked-SessionToken": session_token, "X-Booked-UserId": user_id}
-#     availability_url = f"{LIBREBOOKING_API_URL}/Resources/{resource_id}/Availability"
-#     params: Dict[str, str] = {"dateTime": dateTime}
-
-#     logging.debug(f"--- DEBUG get_availability (Documented Endpoint) ---")
-#     logging.debug(f"Calling URL: {availability_url}")
-#     logging.debug(f"Headers Sent: {headers}")
-#     logging.debug(f"Parameters Sent (Query String): {params}")
-
-#     try:
-#         response = requests.get(availability_url, headers=headers, params=params)
-
-#         logging.debug(f"Response Received (Status Code): {response.status_code}")
-#         try:
-#             raw_response_text = response.text
-#             logging.debug(f"Response Received (Raw Text): {raw_response_text[:1000]}")
-#         except Exception as e:
-#             logging.debug(f"Could not read raw response text: {e}")
-
-#         response.raise_for_status()
-#         availability_data = response.json()
-
-#         logging.debug(f"Response Received (Parsed JSON - Availability):\n{pprint.pformat(availability_data)}")
-
-#         is_available_from_api = False # Flag grezzo dall'API
-#         available_until_iso = None # Può essere utile per altri scopi, ma non per la decisione primaria
-#         next_available_str = None
-#         resource_name = f"Resource {resource_id}" # Default name
-#         slot_info = None # Initialize slot_info
-
-#         # --- MODIFICA: Gestisci la lista interna inattesa ---
-#         if isinstance(availability_data, dict) and "resources" in availability_data and \
-#            isinstance(availability_data["resources"], list) and len(availability_data["resources"]) > 0 and \
-#            isinstance(availability_data["resources"][0], list): # Controlla se il primo elemento è una LISTA
-
-#             # Itera sulla lista interna per trovare la risorsa corretta
-#             inner_resource_list = availability_data["resources"][0]
-#             for resource_data in inner_resource_list:
-#                 if isinstance(resource_data, dict):
-#                     # Controlla se 'resource' esiste ed è un dizionario
-#                     res_details = resource_data.get("resource")
-#                     if isinstance(res_details, dict) and res_details.get("resourceId") == resource_id:
-#                         slot_info = resource_data # Trovata la risorsa corretta!
-#                         is_available_from_api = slot_info.get("available", False) 
-#                         logging.debug(f"Found matching resource data for ID {resource_id}: {slot_info}")
-#                         break # Esci dal loop una volta trovata
-#             if slot_info is None:
-#                  logging.warning(f"Resource ID {resource_id} not found within the inner list returned by API.")
-#         # --- FINE MODIFICA ---
-#         else:
-#             logging.warning(f"Unexpected API response structure (expected 'resources' -> list -> list): {availability_data}")
-
-#         final_is_available = False # Stato di disponibilità finale che useremo
-#         next_available_str_formatted = None # Per la stringa "next avail:"
-
-#         # --- Ora processa slot_info SE è stato trovato ---
-#         if isinstance(slot_info, dict):
-#             # Estrai nome risorsa se presente
-#             resource_details = slot_info.get("resource")
-#             if isinstance(resource_details, dict):
-#                 resource_name = resource_details.get("name", resource_name)
-
-#             # Estrai i campi rilevanti dall'API
-#             is_available_from_api = slot_info.get("available", False) # Flag grezzo dall'API
-#             available_until_iso = slot_info.get("availableUntil")
-#             available_at_iso = slot_info.get("availableAt")
-
-#             try:
-#                 dt_requested = dateparser.parse(dateTime)
-#                 if not dt_requested:
-#                      logging.error(f"Could not parse requested dateTime '{dateTime}' for availability check.")
-#                      return f"❌ Error: Could not parse the requested date/time '{dateTime}'."
-
-#                 dt_available_until = dateparser.parse(available_until_iso) if available_until_iso else None
-#                 dt_available_at = dateparser.parse(available_at_iso) if available_at_iso else None
-
-#                 # LOG AGGIUNTIVO per debug parsing date
-#                 logging.debug(f"Parsed dates for comparison: dt_requested='{dt_requested.isoformat() if dt_requested else 'None'}' (from '{dateTime}'), "
-#                               f"dt_available_until='{dt_available_until.isoformat() if dt_available_until else 'None'}' (from '{available_until_iso}'), "
-#                               f"dt_available_at='{dt_available_at.isoformat() if dt_available_at else 'None'}' (from '{available_at_iso}')")
-#                 # FINE LOG AGGIUNTIVO
-
-#                 # La decisione primaria si basa direttamente sul campo 'available' dell'API per lo slot richiesto.
-
-#                 if is_available_from_api:
-#                     # API dice 'available: true'. Ora verifichiamo i limiti.
-#                     slot_is_truly_available = True # Partiamo ottimisti
-
-#                     if dt_available_until:
-#                         # Se l'ora richiesta è uguale o successiva a availableUntil, non è disponibile.
-#                         # Esempio: availableUntil=15:00, richiesta=15:00 -> NON disponibile
-#                         # Esempio: availableUntil=15:00, richiesta=16:00 -> NON disponibile
-#                         if dt_requested >= dt_available_until:
-#                             slot_is_truly_available = False
-#                             logging.debug(f"Availability check (API true): Requested time {dt_requested.isoformat()} is >= availableUntil {dt_available_until.isoformat()}. Marked NOT available.")
-
-#                     if slot_is_truly_available and dt_available_at: # Controlla solo se ancora potenzialmente disponibile
-#                         # Se l'ora richiesta è precedente a availableAt, non è disponibile.
-#                         # Esempio: availableAt=16:00, richiesta=15:00 -> NON disponibile
-#                         if dt_requested < dt_available_at:
-#                             slot_is_truly_available = False
-#                             logging.debug(f"Availability check (API true): Requested time {dt_requested.isoformat()} is < availableAt {dt_available_at.isoformat()}. Marked NOT available.")
-                    
-#                     final_is_available = slot_is_truly_available
-#                     if final_is_available:
-#                         logging.debug(f"Availability determined: Available. API 'available: true' and time slot {dateTime} is within bounds (availableUntil: {available_until_iso}, availableAt: {available_at_iso}).")
-#                     else:
-#                         # Se non è disponibile, e l'API aveva detto true, cerchiamo comunque la prossima disponibilità da availableAt se fornito
-#                         if dt_available_at and dt_requested < dt_available_at: # Se la ragione era che availableAt è futuro
-#                              next_available_str_formatted = dt_available_at.strftime('%d/%m/%Y at %H:%M')
-#                         logging.debug(f"Availability determined: Not Available despite API 'available: true'. Slot {dateTime} outside bounds (availableUntil: {available_until_iso}, availableAt: {available_at_iso}).")
-
-#                 else: # is_available_from_api è False
-#                     if dt_available_at:
-#                         # Confronta direttamente gli oggetti datetime
-#                         # dateparser dovrebbe averli resi confrontabili (entrambi aware o entrambi naive)
-#                         if dt_requested == dt_available_at: # MODIFICA: confronto diretto datetime
-#                             final_is_available = True
-#                             logging.debug(f"Availability determined: Available. API 'available: false' but 'availableAt' ({available_at_iso}) matches requested time {dateTime} [datetime comparison].")
-#                         else:
-#                             final_is_available = False
-#                             next_available_str_formatted = dt_available_at.strftime('%d/%m/%Y at %H:%M')
-#                             # Log migliorato per vedere la differenza
-#                             logging.debug(f"Availability determined: Not available. API 'available: false'. Requested: {dt_requested.isoformat()}, Parsed AvailableAt: {dt_available_at.isoformat()} (from API value: {available_at_iso}). Next is {next_available_str_formatted}.")
-#                     else:
-#                         final_is_available = False # API dice false e non c'è availableAt
-#                         logging.debug(f"Availability determined: Not available. API 'available: false' and no 'availableAt' provided for {dateTime}.")
-
-
-              
-#             except Exception as e:
-#                 logging.error(f"Error during availability determination logic: {e}", exc_info=True)
-#                 final_is_available = False # Sicurezza in caso di errore
-#                 # Potresti voler restituire un messaggio di errore qui invece di continuare
-
-#         # --- Fine processamento slot_info ---
-
-#         # --- Formatta la stringa di ritorno per l'agente ---
-#         requested_dt_str = ""
-#         try:
-#             parsed_req_dt = dateparser.parse(dateTime)
-#             if parsed_req_dt:
-#                 requested_dt_str = f" on {parsed_req_dt.strftime('%d/%m')} at {parsed_req_dt.strftime('%H:%M')}" # Formato italiano
-#         except Exception:
-#             requested_dt_str = f" for {dateTime}"
-
-#         if final_is_available:
-#             return f"✅ {resource_name}: Available{requested_dt_str}."
-#         elif next_available_str_formatted: # Se non è disponibile ma abbiamo una prossima data
-#             return f"❌ {resource_name}: Not available{requested_dt_str} (next avail: {next_available_str_formatted})."
-#         else:
-#             return f"❌ {resource_name}: Not available{requested_dt_str}."
-
-#     # --- Gestione eccezioni ---
-#     except requests.exceptions.HTTPError as e:
-#         if e.response.status_code == 401: return "❌ Authentication Error: Invalid/expired token."
-#         if e.response.status_code == 404: return f"❌ Error: Resource '{resource_id}' not found or availability endpoint incorrect ({availability_url})."
-#         logging.error(f"❌ HTTP error get_availability {resource_id}: {e}", exc_info=True)
-#         return f"❌ HTTP Error ({e.response.status_code}) retrieving availability for {resource_id}."
-#     except requests.RequestException as e:
-#         logging.error(f"❌ Generic error get_availability {resource_id}: {e}", exc_info=True)
-#         return f"❌ Network/server error retrieving availability for {resource_id}."
-#     except json.JSONDecodeError as e:
-#         logging.error(f"❌ Error parsing JSON get_availability {resource_id}: {e}", exc_info=True)
-#         return f"❌ Error parsing availability response for {resource_id}."
-#     except Exception as e: # Catch other unexpected errors (e.g., date parsing)
-#         logging.error(f"❌ Unexpected error in get_availability for {resource_id}: {e}", exc_info=True)
-#         return f"❌ Internal error during availability check for {resource_id}."
-#     finally:
-#         logging.debug(f"--- END DEBUG get_availability for resource {resource_id} ---")
 
 
 # --- Tool: create_reservation ---
@@ -538,11 +332,14 @@ class CreateReservationArgs(BaseModel):
     startDateTime: str = Field(..., description='ISO 8601 start date/time (from parse_date).')
     endDateTime: str = Field(..., description='ISO 8601 end date/time (calculated or from parse_date).')
     resourceId: str = Field(..., description="Specific resource ID (from get_resources).")
+    accessories: List[Dict[str, Any]] = Field(..., description="List of accessories to book with the reservation. Each item should be a dict with 'accessoryId' (str) and 'quantityRequested' (int). Example: [{'accessoryId': '1', 'quantityRequested': 1}]. Se non sono richiesti accessori, passare una lista vuota []. **Questo campo è obbligatorio.**")
+
 
 @tool(args_schema=CreateReservationArgs)
-def create_reservation(session_token: str, user_id: str, startDateTime: str, endDateTime: str, resourceId: str, title: str = "", description: str = "") -> str:
+def  create_reservation(session_token: str, user_id: str, startDateTime: str, endDateTime: str, resourceId: str, accessories: List[Dict[str, Any]], title: str = "", description: str = "") -> str:
     """
     Crea una prenotazione per una risorsa specifica in un intervallo di tempo.
+    Richiede una lista di accessori (anche vuota []), ciascuno con 'accessoryId' e 'quantityRequested'.
     **GESTIONE FALLIMENTI:** Se questo tool fallisce perché la risorsa non è disponibile
     (es. errore HTTP 409 o messaggio di conflitto) e in precedenza avevi verificato
     che altre risorse erano disponibili per lo stesso orario (tramite `get_availability`),
@@ -550,7 +347,7 @@ def create_reservation(session_token: str, user_id: str, startDateTime: str, end
     Non effettuare chiamate multiple a `create_reservation` per diverse alternative in un unico turno.
     Dopo aver tentato la singola alternativa, riporta l'esito (successo o fallimento di quel tentativo).
     """
-    if not all([session_token, user_id, startDateTime, endDateTime, resourceId]):
+    if not all([session_token, user_id, startDateTime, endDateTime, resourceId, accessories is not None]): # Aggiunto controllo accessories is not None
         return "❌ Errore: Mancano informazioni essenziali (token, user ID, date, resource ID)."
 
     if not resourceId.isdigit():
@@ -566,10 +363,29 @@ def create_reservation(session_token: str, user_id: str, startDateTime: str, end
         "resourceId": resourceId,
         "userId": user_id,
         "termsAccepted": True,
-        "allowParticipation": False
-    }
+        "allowParticipation": False,
+        "accessories": accessories,  # Passa direttamente la lista di accessori
 
-    logger.debug(f"create_reservation: Corpo della richiesta: {json.dumps(body)}")
+    }
+    if accessories: # Ora accessories è sempre una lista, potrebbe essere vuota
+        # Modifica qui per far corrispondere le aspettative dell'API
+        # basandoci sull'errore "Undefined property: stdClass::$quantityRequested"
+        processed_accessories = []
+        for acc in accessories:
+            qty_req_val = acc.get("quantityRequested")
+            if qty_req_val is None: # Fallback se l'LLM ha usato "quantity"
+                qty_req_val = acc.get("quantityRequested")
+            
+            # Assicura che sia un intero se non None, altrimenti l'API potrebbe rifiutarlo
+            if qty_req_val is not None:
+                try: qty_req_val = int(qty_req_val)
+                except (ValueError, TypeError): qty_req_val = None # Lascia che l'API lo segnali come errore se non è un intero valido
+
+            processed_accessories.append({"accessoryId": acc.get("accessoryId"), "quantityRequested": qty_req_val})
+        body["accessories"] = processed_accessories
+
+    log_body = {k: v for k, v in body.items() if k != "session_token"} # Non loggare il token nel corpo se per errore finisce lì
+    logger.debug(f"create_reservation: Corpo della richiesta: {json.dumps(log_body)}")
 
     try:
         response = requests.post(f"{LIBREBOOKING_API_URL}/Reservations/", json=body, headers=headers)
@@ -582,15 +398,42 @@ def create_reservation(session_token: str, user_id: str, startDateTime: str, end
 
         if ref_num:
             logger.info(f"create_reservation: Prenotazione creata con successo. Numero di riferimento: {ref_num}")
-            start_dt_parsed = dateparser.parse(startDateTime)
-            start_formatted = start_dt_parsed.strftime('%d/%m/%Y alle %H:%M') if start_dt_parsed else startDateTime
-            return (f"✅ {message}\n"
-                    f"Prenotazione per la risorsa {resourceId} il {start_formatted}.\n"
-                    f"Numero di riferimento: {ref_num}\n"
-                    f"Conserva questo numero: ti servirà per cancellare o modificare la prenotazione.")
+            # --- MODIFICA PER CORREGGERE LA VISUALIZZAZIONE DELL'ORARIO ---
+            try:
+                # startDateTime arriva in formato UTC (es. "2025-06-28T08:00:00+00:00")
+                start_dt_utc = dateparser.parse(startDateTime) # This is already UTC
+                if start_dt_utc:
+                    # Converti in fuso orario locale per la visualizzazione
+                    local_tz = dateutil.tz.gettz('Europe/Rome')
+                    start_dt_local = start_dt_utc.astimezone(local_tz)
+                    start_formatted = start_dt_local.strftime('%d/%m/%Y alle %H:%M')
+                else:
+                    start_formatted = startDateTime # Fallback
+            except Exception:
+                start_formatted = startDateTime # Fallback in caso di qualsiasi errore
+            # --- FINE MODIFICA VISUALIZZAZIONE ---
+            
+            # Aggiungi l'orario UTC per l'LLM nel messaggio del tool
+            utc_time_for_llm = startDateTime # startDateTime è già in UTC
+            accessories_message_part = ""
+            if accessories: # 'accessories' è l'argomento passato al tool con 'quantityRequested'
+                accessory_details_list = []
+                # Nota: qui abbiamo solo gli ID. Per i nomi, l'agente dovrebbe averli recuperati
+                # da get_accessories e idealmente passati o usati per costruire la descrizione.
+                for acc_req in accessories:
+                    accessory_details_list.append(
+                        f"{acc_req.get('quantityRequested', 'N/A')}x ID:{acc_req.get('accessoryId', 'N/A')}"
+                    )
+                if accessory_details_list:
+                    accessories_message_part = f" con accessori: {', '.join(accessory_details_list)}"
+
+            return (f"✅ {message} Prenotazione per la risorsa {resourceId} il {start_formatted} (UTC: {utc_time_for_llm}){accessories_message_part}.\n"
+                    f"Numero di riferimento: {ref_num}. Conservalo per future modifiche o cancellazioni. Titolo: '{title}'. Descrizione: '{description}'.")
         else:
             logger.warning("create_reservation: Prenotazione creata ma il numero di riferimento è vuoto.")
-            return f"⚠️ {message} (Attenzione: numero di riferimento non ricevuto)."
+            # Anche se il ref_num è vuoto, la prenotazione potrebbe essere stata creata.
+            # Il messaggio API dovrebbe indicarlo.
+            return f"⚠️ {message} (Attenzione: il numero di riferimento non è stato restituito chiaramente, ma la prenotazione potrebbe essere stata creata)."
 
     except requests.exceptions.HTTPError as e:
         error_details = "Dettagli non disponibili."
@@ -626,6 +469,9 @@ class UpdateReservationArgs(BaseModel):
     resourceId: str = Field(..., description="The **valid** ID of the resource for the updated reservation (can be the same or a new one, obtained from get_reservation or get_resources). DO NOT use 'N/A'.")
     title: Optional[str] = Field(None, description="The NEW title for the reservation (optional). If not provided, a default ('Reservation') will be used.")
     description: Optional[str] = Field(None, description="The NEW description for the reservation (optional).")
+    num_people: Optional[int] = Field(None, description="The number of people for the reservation. This will automatically add the corresponding number of chairs.")
+    accessories: Optional[List[Dict[str, Any]]] = Field(None, description="Optional list of other accessories to update (e.g., projector). Each item should be a dict with 'accessoryId' and 'quantityRequested'. **Do NOT include chairs here; use 'num_people' instead.**")
+    
     updateScope: Optional[str] = Field(None, description="Specifies the scope of the update (optional). Possible values: 'this' (this occurrence only), 'full' (entire series), 'future' (this and future occurrences). Default is usually 'full'.")
 
 @tool(args_schema=UpdateReservationArgs)
@@ -638,15 +484,15 @@ def update_reservation(
     resourceId: str,
     title: Optional[str] = None,
     description: Optional[str] = None,
+    num_people: Optional[int] = None,
+    accessories: Optional[List[Dict[str, Any]]] = None,
     updateScope: Optional[str] = None
 ) -> str:
     """
-    Updates an existing reservation identified by its reference number.
-    Requires the exact reference number and the new reservation details (at least dates and a valid resource ID).
-    The agent should use this tool when the user explicitly asks to modify a reservation.
-    It might be necessary to call `get_reservation` first to confirm current details, including the `resourceId`.
-    If `get_reservation` does not return a valid resource ID, the agent MUST ask the user which resource to use.
-    Returns a success or error message.
+    Updates an existing reservation. Use this to change time, resource, title, description, or add accessories.
+    **IMPORTANT**: To specify the number of attendees, use the `num_people` parameter. This will automatically handle adding the correct number of chairs. Do NOT add chairs to the `accessories` list.
+    The `accessories` list is for other items like projectors or microphones.
+    Requires the exact reference number and all other reservation details. It's often necessary to call `get_reservation` first to retrieve current details.
     """
     if not all([session_token, user_id, reference_number, startDateTime, endDateTime, resourceId]):
         return "❌ Error: Missing essential information (token, user ID, ref number, dates, resource ID) for the update."
@@ -670,6 +516,20 @@ def update_reservation(
         "title": title if title is not None else "Reservation", # Use default if not provided
         "description": description if description is not None else "" # Always include, empty if None
     }
+
+    # --- NEW LOGIC to handle accessories and num_people ---
+    final_accessories = accessories.copy() if accessories is not None else []
+
+    if num_people is not None and num_people > 0:
+        # Assume chair accessory has ID '1'. This is a reasonable simplification based on get_accessories output.
+        chair_accessory_id = '1'
+        # Remove any existing chair entry from the list to avoid duplicates if the LLM adds it anyway
+        final_accessories = [acc for acc in final_accessories if acc.get('accessoryId') != chair_accessory_id]
+        # Add the new chair request based on num_people
+        final_accessories.append({'accessoryId': chair_accessory_id, 'quantityRequested': num_people})
+        logging.info(f"update_reservation: Added/updated {num_people} chairs (ID: {chair_accessory_id}) to the request.")
+
+    body["accessories"] = final_accessories # Add the final list to the body
 
     # Handle optional updateScope parameter
     params = {}
@@ -840,7 +700,176 @@ def get_availability_by_checking_bookings(session_token: str, user_id: str, reso
         logging.error(f"Errore generico in get_availability_by_checking_bookings per risorsa {resource_id}: {e}", exc_info=True)
         return f"❌ Errore interno durante la verifica della disponibilità basata su prenotazioni."
 
+# --- Tool: get_accessories ---
+class GetAccessoriesArgs(BaseModel):
+    session_token: str = Field(..., description="Il token di sessione valido ottenuto dall'autenticazione.")
+    user_id: str = Field(..., description="L'ID utente valido ottenuto dall'autenticazione.")
+
+@tool(args_schema=GetAccessoriesArgs)
+def get_accessories(session_token: str, user_id: str) -> list | str:
+    """
+    Recupera la lista di tutti gli accessori disponibili.
+    Chiama questo tool quando l'utente chiede informazioni sugli accessori disponibili o vuole aggiungere accessori a una prenotazione.
+    """
+    if not all([session_token, user_id]):
+        return "❌ Errore: Mancano token o user ID."
+    headers = {"X-Booked-SessionToken": session_token, "X-Booked-UserId": user_id}
+    try:
+        response = requests.get(f"{LIBREBOOKING_API_URL}/Accessories/", headers=headers)
+        response.raise_for_status()
+        accessories = response.json().get("accessories", [])
+        if not accessories:
+            logger.warning("get_accessories: Nessun accessorio trovato nella risposta API.")
+            return "⚠️ Nessun accessorio trovato."
+        simplified_accessories = [
+            {"id": a.get("id"), "name": a.get("name"), "quantityAvailable": a.get("quantityAvailable")}
+            for a in accessories if a.get("id") and a.get("name")
+        ]
+        return simplified_accessories
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+            return "❌ Errore Autenticazione: Token non valido/scaduto."
+        logger.error(f"❌ Errore HTTP recupero accessori: {e}", exc_info=True)
+        return f"❌ Errore HTTP ({e.response.status_code}) recupero accessori."
+    except requests.RequestException as e:
+        logger.error(f"❌ Errore generico recupero accessori: {e}", exc_info=True)
+        return f"❌ Errore rete/server recupero accessori."
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ Errore parsing JSON per accessori: {e}", exc_info=True)
+        return f"❌ Errore analisi risposta accessori."
+    except Exception as e:
+        logger.error(f"❌ Errore imprevisto elaborazione accessori: {e}", exc_info=True)
+        return "❌ Errore interno elaborazione accessori."
+
 # Funzione di serializzazione - INVARIATO
+
+# --- Nuovi Nodi per il Grafo Guidato ---
+
+def initial_processing_node(state: State) -> State:
+    """
+    Nodo iniziale: gestisce l'autenticazione e analizza la prima richiesta utente.
+    """
+    logger.info(">>> [initial_processing_node] Chiamato")
+    messages = state["messages"]
+    new_messages_for_state = list(messages) # Lavora su una copia per lo stato
+
+    # 1. Autenticazione (se necessaria)
+    if not state.get("session_token") or not state.get("user_id"):
+        logger.info("initial_processing_node: Autenticazione necessaria.")
+        # Chiamata diretta al tool, non tramite LLM per questo passaggio specifico
+        auth_result = authenticate_tool.invoke({})
+        if isinstance(auth_result, dict) and auth_result.get("session_token"):
+            state["session_token"] = auth_result["session_token"]
+            state["user_id"] = auth_result["user_id"]
+            logger.info(f"initial_processing_node: Autenticazione riuscita: Token={state['session_token'][:5]}..., UserID={state['user_id']}")
+            # Aggiungiamo un ToolMessage per tracciare l'azione, come farebbe un agente
+            # Questo aiuta anche l'LLM nei nodi successivi a "sapere" che l'autenticazione è avvenuta
+            # e ad avere il risultato del tool nella cronologia.
+            auth_tool_call_id = f"call_{uuid.uuid4().hex[:20]}" # ID più breve
+            new_messages_for_state.append(
+                AIMessage(
+                    content="", # L'LLM non ha bisogno di contenuto qui, solo della tool_call
+                    tool_calls=[{"name": "authenticate_tool", "args": {}, "id": auth_tool_call_id, "type":"tool_call"}]
+                )
+            )
+            new_messages_for_state.append(
+                ToolMessage(
+                    content=json.dumps(auth_result),
+                    name="authenticate_tool",
+                    tool_call_id=auth_tool_call_id
+                )
+            )
+        else:
+            logger.error("initial_processing_node: Autenticazione fallita.")
+            error_msg = AIMessage(content="Autenticazione fallita. Impossibile procedere.")
+            new_messages_for_state.append(error_msg)
+            # Sovrascrivi i messaggi nello stato con quelli aggiornati
+            return {**state, "messages": new_messages_for_state}
+
+    # 2. Analizza la prima richiesta utente (se presente) per parole chiave "persone" o "accessori"
+    #    e se l'intento è una prenotazione.
+    first_user_message_content = ""
+    if messages and isinstance(messages[0], HumanMessage):
+        first_user_message_content = messages[0].content.lower()
+    elif messages and isinstance(messages[0], dict) and messages[0].get("type") == "human": # Gestisce messaggi serializzati
+        first_user_message_content = messages[0].get("content", "").lower()
+
+    is_booking_intent = "prenota" in first_user_message_content or \
+                        "riserva" in first_user_message_content or \
+                        "sala" in first_user_message_content # Semplice euristica
+
+    mentions_people = bool(re.search(r'\b(\d+)\s*(persone|persona)\b', first_user_message_content))
+    mentions_accessories_keywords = any(keyword in first_user_message_content for keyword in ["proiettore", "lavagna", "sedie", "accessori"])
+
+    if is_booking_intent and (mentions_people or mentions_accessories_keywords):
+        logger.info("initial_processing_node: Rilevata richiesta di prenotazione con menzione di persone/accessori.")
+        state["needs_initial_accessories_check"] = True
+        state["awaiting_accessories_update"] = False # Ensure this is false at start of new flow
+    else:
+        state["needs_initial_accessories_check"] = False
+
+    # Aggiorna i messaggi nello stato
+    return {**state, "messages": new_messages_for_state}
+
+
+def get_accessories_node(state: State) -> State:
+    """
+    Chiama il tool get_accessories e aggiorna lo stato.
+    """
+    logger.info(">>> [get_accessories_node] Chiamato")
+    session_token = state.get("session_token")
+    user_id = state.get("user_id")
+    new_messages_for_state = list(state.get("messages", []))
+
+    if not session_token or not user_id:
+        logger.error("get_accessories_node: Token o User ID mancanti.")
+        new_messages_for_state.append(AIMessage(content="Errore: Autenticazione mancante per recuperare gli accessori."))
+        return {**state, "messages": new_messages_for_state, "available_accessories": None, "needs_initial_accessories_check": False,
+        "awaiting_accessories_update":False}
+
+    try:
+        accessories_result = get_accessories.invoke({"session_token": session_token, "user_id": user_id})
+        tool_call_id = f"call_{uuid.uuid4().hex[:20]}" # ID più breve
+        new_messages_for_state.append(AIMessage(content="", tool_calls=[{"name": "get_accessories", "args": {}, "id": tool_call_id, "type":"tool_call"}]))
+        new_messages_for_state.append(ToolMessage(content=json.dumps(accessories_result) if isinstance(accessories_result, list) else str(accessories_result), tool_call_id=tool_call_id, name="get_accessories"))
+
+        if isinstance(accessories_result, list):
+            logger.info(f"get_accessories_node: Accessori recuperati: {len(accessories_result)}")
+            return {**state, "messages": new_messages_for_state, "available_accessories": accessories_result, "needs_initial_accessories_check": False}
+        else: # Errore o formato inatteso
+            logger.warning(f"get_accessories_node: get_accessories non ha restituito una lista: {accessories_result}")
+            return {**state, "messages": new_messages_for_state, "available_accessories": None, "needs_initial_accessories_check": False}
+    except Exception as e:
+        logger.error(f"get_accessories_node: Errore durante la chiamata a get_accessories: {e}", exc_info=True)
+        new_messages_for_state.append(AIMessage(content=f"Errore durante il recupero degli accessori: {e}"))
+        return {**state, "messages": new_messages_for_state, "available_accessories": None, "needs_initial_accessories_check": False}
+
+
+def ask_details_node(state: State) -> State:
+    """
+    Nodo che formula la domanda sui dettagli degli accessori all'utente.
+    Assume che la disponibilità sia stata verificata e una sala scelta.
+    """
+    logger.info(">>> [ask_details_node] Chiamato")
+    new_messages_for_state = list(state.get("messages", []))
+    last_ai_message_content_for_context = "Disponibilità confermata." # Default
+
+    # Cerca l'ultimo messaggio dell'agente che conferma la disponibilità della sala
+    # per fornire contesto nella domanda.
+    for msg in reversed(new_messages_for_state):
+        if isinstance(msg, AIMessage) and msg.content and "disponibile" in msg.content.lower():
+            last_ai_message_content_for_context = msg.content
+            break
+    
+    question = (f"{last_ai_message_content_for_context}\n"
+                f"Per completare la prenotazione, le servono accessori specifici (es. proiettore, microfono)? "
+                f"Se sì, quali e quanti? Le sedie per le persone indicate saranno incluse se disponibili.")
+    new_messages_for_state.append(AIMessage(content=question))
+    logger.info(f"ask_details_node: Posta domanda sui dettagli: {question}")
+    return {**state, "messages": new_messages_for_state, "details_asked": True, "availability_check_done": True}
+
+# --- Fine Nuovi Nodi ---
+
 def serialize_messages(messages: List[Any]) -> List[Dict[str, Any]]:
     """Serializza i messaggi per logging/debugging."""
     serialized = []
@@ -867,38 +896,64 @@ llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.5)
 tools = [
     parse_date, authenticate_tool, get_resources,
     create_reservation, get_reservation, delete_reservation, get_availability_by_checking_bookings, # Aggiunto nuovo tool
-    update_reservation
+    update_reservation, get_accessories
 ]
 llm_with_tools = llm.bind_tools(tools)
 
 # 🎭 Crea l'agente ReAct - INVARIATO
 
 # Modifica le istruzioni di sistema per l'agente ReAct
+
 system_message = """
-Sei un assistente per la prenotazione di risorse.
+Sei un assistente AI per la prenotazione di risorse. Il tuo flusso di lavoro è guidato da una StateGraph.
 Utilizza gli strumenti a tua disposizione per aiutare l'utente a prenotare, modificare o cancellare sale meeting.
 Segui scrupolosamente le condizioni d'uso di ciascuno strumento.
 
-**Istruzioni Speciali per la Prenotazione:**
-1. Quando l'utente chiede di prenotare una sala e **NON specifica quale**, usa `get_resources` per vedere le opzioni.
-2. Poi, per la data e l'ora specificate dall'utente (ottenute con `parse_date` e solo se `time_specified` è true), usa `get_availability_by_checking_bookings` **per ogni risorsa** trovata.
-3. **IMPORTANTE:** Se, dopo aver controllato la disponibilità per più risorse, trovi che **almeno una** è disponibile (risultato con ✅), **NON presentare una lista all'utente**. Invece, procedi **IMMEDIATAMENTE** a chiamare il tool `create_reservation` per la **PRIMA** risorsa che è risultata disponibile (quella corrispondente al primo risultato ✅ che hai ricevuto).
-   Assicurati di usare `get_availability_by_checking_bookings` per questa verifica.
-4. Per la prenotazione automatica, usa la data/ora richiesta dall'utente come `startDateTime` e calcola `endDateTime` aggiungendo 1 ora. Usa un titolo di default come "Prenotazione [Nome Sala]".
-5. Dopo aver chiamato `create_reservation`, riporta all'utente l'esito (successo o fallimento) usando il messaggio di ritorno del tool.
-6. Se **nessuna** risorsa risulta disponibile (tutti risultati ❌), informa l'utente in modo conciso che non ci sono sale disponibili per quell'orario e chiedi se vuole provare un altro orario o giorno. NON elencare tutte le sale non disponibili.
+**REGOLA FONDAMENTALE: SEMPLIFICARE LA PRENOTAZIONE**
+Il tuo obiettivo è creare una prenotazione di base il prima possibile, per poi offrire all'utente la possibilità di aggiungere dettagli (come accessori o numero di persone) tramite un aggiornamento.
 
-**Istruzioni Generali:**
-- Mantieni un tono professionale e cortese.
-- Chiedi chiarimenti se le informazioni fornite dall'utente sono insufficienti (es. data/ora non chiara, risorsa non specificata quando necessario).
-- Gestisci gli errori dei tool e informa l'utente in modo appropriato.
-- Ricorda di autenticarti (`authenticate_tool`) quando necessario.
+--- FLUSSO DI PRENOTAZIONE ---
 
-**Gestione del Contesto Temporale:**
-- Quando l'utente fa una richiesta che dipende da una data e/o ora discussa in precedenza (ad esempio, chiede di prenotare una sala specifica dopo aver verificato la disponibilità per un certo orario), **DEVI** riutilizzare la data e l'ora esatta (in formato ISO 8601) che è stata precedentemente determinata tramite lo strumento `parse_date` e presente nella cronologia della conversazione.
-- Non re-interpretare frasi come "domani" se il "domani" è già stato risolto in una data ISO specifica. Usa sempre il risultato ISO 8601 più recente e rilevante di `parse_date` per le azioni successive che richiedono una data/ora.
-- Se l'utente non specifica una nuova data/ora esplicita per un'azione, assumi che si riferisca al contesto temporale più recente stabilito nella conversazione e utilizza la corrispondente data/ora ISO 8601 precedentemente parsata.
-- Per il campo `endDateTime` dello strumento `create_reservation`, calcolalo sempre aggiungendo 1 ora allo `startDateTime` che hai determinato.
+1.  **Autenticazione (se necessaria):** Se non hai un token di sessione valido, il sistema chiamerà `authenticate_tool` per te. Parti dal presupposto di essere autenticato.
+
+2.  **Raccogli Info Essenziali:**
+    *   Interpreta la data e l'ora richieste dall'utente con `parse_date`.
+    *   Se l'utente non specifica una risorsa, usa `get_resources` per vedere le opzioni.
+
+3.  **Verifica Disponibilità e Crea Subito:**
+    *   Usa `get_availability_by_checking_bookings` per trovare una risorsa disponibile all'orario richiesto.
+    *   **AZIONE IMMEDIATA:** Appena trovi una risorsa disponibile, **DEVI** chiamare immediatamente `create_reservation`.
+    *   **PARAMETRI per `create_reservation`:**
+        *   Usa `resourceId`, `startDateTime`, e `endDateTime` (calcolata aggiungendo 1 ora a startDateTime) che hai appena verificato.
+        *   Per il `title`, usa "Prenotazione Utente [user_id]".
+        *   Per la `description`, puoi lasciare vuoto o inserire un testo generico.
+        *   **IMPORTANTE:** Per il campo `accessories`, passa **SEMPRE** una lista vuota `[]` in questa fase iniziale.
+
+4.  **Post-Creazione (Gestito dal sistema):**
+    *   Dopo una creazione riuscita, il sistema ti chiederà automaticamente se l'utente vuole aggiungere accessori. La tua responsabilità è gestire la risposta dell'utente nel turno successivo.
+
+--- FLUSSO DI AGGIORNAMENTO (DOPO LA CREAZIONE) ---
+
+*   **SE** hai appena creato una prenotazione e il sistema ha chiesto all'utente se vuole aggiungere accessori (`awaiting_accessories_update: true`), il messaggio corrente dell'utente è la sua risposta.
+*   **Se l'utente dice 'no' o nega,** rispondi "Perfetto, la sua prenotazione rimane confermata." e termina.
+*   **Se l'utente dice 'sì' e fornisce dettagli** (es. "sì, per 10 persone e un proiettore"):
+    1.  Usa il numero di riferimento memorizzato nello stato (`last_created_ref`).
+    2.  **DEVI** prima chiamare `get_reservation` con quel numero di riferimento per recuperare i dettagli attuali (specialmente `resourceId`, `startDateTime`, `endDateTime`). Questo è FONDAMENTALE.
+    3.  Analizza la richiesta dell'utente per il numero di persone e gli accessori. Se necessario, chiama `get_accessories` per verificare la disponibilità e gli ID.
+    4.  Prepara i nuovi parametri per `update_reservation`. Aggiorna la `description` per riflettere le modifiche (es. "Per 10 persone con proiettore").
+    5.  Chiama `update_reservation`.
+    6.  Informa l'utente dell'esito.
+
+--- ALTRI FLUSSI ---
+
+**Cancellazione Prenotazione:**
+1.  Usa `get_reservation` per recuperare i dettagli.
+2.  Mostra i dettagli all'utente.
+3.  Chiedi conferma ESATTA: 'Vuoi cancellare questa prenotazione? Rispondi "sì" per confermare.'
+4.  Se l'utente risponde 'sì', chiama `delete_reservation`.
+
+**Modifica Prenotazione Esistente (non immediatamente dopo la creazione):**
+*   Simile al flusso di aggiornamento post-creazione. Chiedi il numero di riferimento, usa `get_reservation` per ottenere i dettagli attuali, raccogli le modifiche desiderate e poi chiama `update_reservation`.
 """
 
 # Crea l'agente ReAct con le istruzioni di sistema modificate
@@ -976,185 +1031,162 @@ def agent_node(state: State) -> State:
     logging.debug(f"📩 Messaggi OUT: {json.dumps(final_state_output['messages'], indent=2, ensure_ascii=False)}")
     return final_state_output
 
-# --- Logica per la prenotazione automatica ---
-
-def should_auto_book(state: State) -> str:
-    """
-    Nodo condizionale per decidere se tentare una prenotazione automatica.
-    Controlla se l'agente ha appena ricevuto risultati per get_availability per più risorse
-    e se almeno una è disponibile.
-    """
-    messages = state["messages"]
-    if not messages:
-        return "continue_normally"
-
-    # 1. Cerca l'ultimo AIMessage che ha invocato get_availability per più risorse
-    last_multi_get_availability_invoker_msg = None
-    original_tool_calls_for_availability = []
-
-    for i in reversed(range(len(messages))):
-        msg = messages[i]
-        if isinstance(msg, AIMessage) and msg.tool_calls:
-            current_get_availability_calls = [
-                tc for tc in msg.tool_calls if tc.get("name") == "get_availability_by_checking_bookings"
-            ]
-            if len(current_get_availability_calls) > 1:
-                last_multi_get_availability_invoker_msg = msg
-                original_tool_calls_for_availability = current_get_availability_calls
-                # Assicurati che questo sia l'ultimo blocco di azione dell'agente prima di una potenziale risposta testuale
-                # Se il messaggio successivo non è un ToolMessage o un AIMessage testuale, probabilmente non è il caso giusto.
-                if i + 1 < len(messages) and (isinstance(messages[i+1], ToolMessage) or (isinstance(messages[i+1], AIMessage) and messages[i+1].content and not messages[i+1].tool_calls)):
-                    break # Trovato un candidato valido
-                else: # Non sembra essere l'ultimo ciclo di azione prima di una risposta
-                    last_multi_get_availability_invoker_msg = None
-                    original_tool_calls_for_availability = []
-
-    if not last_multi_get_availability_invoker_msg:
-        logging.debug("should_auto_book: Nessuna chiamata multipla recente a get_availability_by_checking_bookings trovata. Continuando normalmente.")
-        return "continue_normally"
-
-    # 2. Verifica i risultati (ToolMessage) di queste chiamate
-    tool_call_ids_invoked = {tc['id'] for tc in original_tool_calls_for_availability}
-    relevant_tool_messages = [
-        msg for msg in messages
-        if isinstance(msg, ToolMessage) and msg.tool_call_id in tool_call_ids_invoked
-    ]
-
-    # Assicurati che tutti i risultati siano presenti
-    if len(relevant_tool_messages) != len(original_tool_calls_for_availability):
-        logging.debug(f"should_auto_book: Non tutti i risultati di get_availability_by_checking_bookings sono presenti. Attesi: {len(original_tool_calls_for_availability)}, Trovati: {len(relevant_tool_messages)}. Continuando normalmente.")
-        return "continue_normally"
-
-    # 3. Controlla se l'agente sta per dare una risposta testuale (la lista)
-    # Se l'ultimo messaggio è un AIMessage con contenuto, o l'ultimissimo ToolMessage
-    if isinstance(messages[-1], AIMessage) and messages[-1].content and not messages[-1].tool_calls:
-        if "disponibil" in messages[-1].content.lower() and ("✅" in messages[-1].content or "❌" in messages[-1].content):
-            logging.debug("should_auto_book: L'agente sta per presentare una lista di disponibilità.")
-        else: # L'ultimo messaggio AI non sembra una lista, quindi non intervenire
-            logging.debug("should_auto_book: L'ultimo messaggio AI non sembra una lista di disponibilità. Continuando normalmente.")
-            return "continue_normally"
-    else: # L'ultimo messaggio non è un AIMessage testuale, quindi l'agente non ha ancora finito il suo ragionamento.
-        logging.debug("should_auto_book: L'agente non ha ancora prodotto una risposta testuale finale. Continuando normalmente.")
-        return "continue_normally"
-
-    # 4. Trova la prima risorsa disponibile e il dateTime
-    available_resource_id = None
-    available_resource_name = "Sala" # Default
-    target_datetime = None
-
-    if original_tool_calls_for_availability: # Dovrebbe esserci sempre se siamo qui
-        target_datetime = original_tool_calls_for_availability[0]['args'].get('dateTime')
-
-    if not target_datetime:
-        logging.warning("should_auto_book: Impossibile determinare dateTime dalle chiamate originali a get_availability_by_checking_bookings.")
-        return "continue_normally"
-
-    for tool_msg in relevant_tool_messages: # Itera sui risultati dei tool
-        if "✅" in tool_msg.content:
-            # Trova la chiamata originale corrispondente per ottenere resource_id
-            original_call = next((tc for tc in original_tool_calls_for_availability if tc['id'] == tool_msg.tool_call_id), None)
-            if original_call:
-                available_resource_id = original_call['args'].get('resource_id')
-                match_name = re.search(r"✅ (.*?):", tool_msg.content) # Estrae il nome dal messaggio di risultato
-                if match_name:
-                    available_resource_name = match_name.group(1).strip()
-                logging.info(f"should_auto_book: Trovata risorsa disponibile per auto-prenotazione: ID {available_resource_id}, Nome: {available_resource_name}")
-                break # Trovata la prima, esci
-
-    if available_resource_id and target_datetime:
-        state["auto_book_target"] = {
-            "resource_id": available_resource_id,
-            "resource_name": available_resource_name,
-            "dateTime": target_datetime
-        }
-        logging.info(f"should_auto_book: Decisione -> auto_book per risorsa {available_resource_id}")
-        return "auto_book"
-    else:
-        logging.debug("should_auto_book: Nessuna risorsa disponibile trovata o informazioni incomplete. Continuando normalmente.")
-        return "continue_normally"
-
-def auto_book_processor_node(state: State) -> State:
-    """
-    Nodo che prepara e aggiunge la chiamata al tool create_reservation
-    per la prima risorsa disponibile.
-    """
-    target = state.get("auto_book_target")
-    if not target:
-        logging.warning("auto_book_processor_node: auto_book_target non trovato nello stato. Nessuna azione.")
-        return state
-
-    session_token = state.get("session_token")
-    user_id = state.get("user_id")
-    resource_id = target["resource_id"]
-    resource_name = target["resource_name"]
-    date_time_str = target["dateTime"]
-
-    if not all([session_token, user_id, resource_id, date_time_str]):
-        logging.error("auto_book_processor_node: Informazioni mancanti per la prenotazione automatica.")
-        # Potremmo aggiungere un messaggio di errore per l'utente qui
-        return {**state, "auto_book_target": None} # Resetta e esci
-
-    try:
-        start_dt = dateparser.parse(date_time_str)
-        if not start_dt: raise ValueError("Impossibile interpretare startDateTime per la prenotazione automatica.")
-        end_dt = start_dt + datetime.timedelta(hours=1) # Assumiamo durata di 1 ora
-        end_date_time_iso = end_dt.isoformat()
-        start_date_time_iso = start_dt.isoformat() # Assicurati che sia ISO
-    except Exception as e:
-        logging.error(f"auto_book_processor_node: Errore nel calcolo di start/end DateTime: {e}")
-        # Aggiungi messaggio di errore per l'utente
-        error_msg_content = f"Si è verificato un errore nel preparare l'orario per la prenotazione automatica: {e}"
-        return {**state, "messages": state["messages"] + [AIMessage(content=error_msg_content)], "auto_book_target": None}
-
-    create_reservation_args = {
-        "session_token": session_token, "user_id": user_id,
-        "resourceId": resource_id, "startDateTime": start_date_time_iso,
-        "endDateTime": end_date_time_iso, "title": f"Prenotazione per {resource_name}",
-    }
-    tool_call_id = f"call_auto_book_{datetime.datetime.now().isoformat().replace(':', '_').replace('.', '_')}"
-
-    # Crea un nuovo AIMessage che informa l'utente e chiama il tool
-    # Questo messaggio sostituirà efficacemente la lista che l'agente avrebbe presentato.
-    ai_message_for_auto_book = AIMessage(
-        content=f"Ho trovato la sala '{resource_name}' (ID: {resource_id}) disponibile per {start_dt.strftime('%d/%m/%Y alle %H:%M')}. Provo a prenotarla...",
-        tool_calls=[{"name": "create_reservation", "args": create_reservation_args, "id": tool_call_id, "type": "tool_call"}]
-    )
-
-    # Rimuovi l'ultimo messaggio AI (la lista) e aggiungi il nuovo messaggio per l'auto-prenotazione
-    # Questo è un punto delicato. Dobbiamo essere sicuri di rimuovere il messaggio giusto.
-    # `should_auto_book` ha già verificato che l'ultimo messaggio è una lista.
-    updated_messages = state["messages"][:-1] + [ai_message_for_auto_book]
-    logging.info(f"auto_book_processor_node: Preparata chiamata a create_reservation per {resource_id}.")
-
-    return {
-        **state,
-        "messages": updated_messages,
-        "auto_book_target": None # Resetta il target dopo l'uso
-    }
-
 # --- Fine logica prenotazione automatica ---
 
-# 🛠️ Crea il grafo - INVARIATO
+# --- Nodo Agente ReAct Potenziato ---
+def enhanced_react_agent_node(state: State) -> Dict[str, Any]:
+    """
+    Invoca l'agente ReAct e poi aggiorna campi specifici dello stato
+    basati sui risultati dei tool chiamati in questo turno.
+    Specificamente, popola `state.available_accessories` e gestisce il post-creazione.
+    """
+    # --- PRE-PROCESSING: Inietta lo stato nel prompt per guidare l'agente ---
+    # Crea una copia dello stato da passare all'agente, potenzialmente modificata
+    state_for_agent = state.copy()
+    update_payload = {}  # Inizia con un payload vuoto
+
+    if state.get("awaiting_accessories_update"):
+        last_ref = state.get("last_created_ref")
+        # Questo messaggio di sistema informa l'agente del contesto attuale
+        info_message_content = (
+            f"NOTA DI SISTEMA: Sei nel flusso di aggiornamento per la prenotazione "
+            f"appena creata con riferimento '{last_ref}'. "
+            f"Il messaggio dell'utente è una risposta alla tua domanda sugli accessori. "
+            f"Segui le istruzioni del 'FLUSSO DI AGGIORNAMENTO' per usare `get_reservation` e `update_reservation`."
+        )
+        # Inserisci il messaggio di sistema all'inizio della cronologia
+        # per dare il massimo contesto all'agente per il turno corrente.
+        messages_for_agent = [SystemMessage(content=info_message_content)] + list(state["messages"])
+        state_for_agent["messages"] = messages_for_agent
+        logging.info("enhanced_react_agent_node: Inserito messaggio di stato per il flusso di aggiornamento.")
+        # Resetta il flag per evitare che venga riutilizzato in loop.
+        # L'agente dovrebbe ora chiamare update_reservation, che non riattiva questo flag.
+        update_payload["awaiting_accessories_update"] = False
+        update_payload["last_created_ref"] = None
+
+    # --- AGENT INVOCATION ---
+    agent_response_dict = react_agent_executor.invoke(state_for_agent)
+
+    # Controlla i messaggi prodotti in questo turno per il risultato dei tool
+    messages_from_current_turn = agent_response_dict.get("messages", [])
+    if not isinstance(messages_from_current_turn, list):
+        messages_from_current_turn = [messages_from_current_turn]
+
+    for msg in reversed(messages_from_current_turn): # Controlla i messaggi più recenti di questo turno
+        if isinstance(msg, ToolMessage):
+            # Gestione risultato di create_reservation
+            if msg.name == "create_reservation":
+                result_message = str(msg.content)
+                if "✅" in result_message:  # Se la prenotazione è stata creata con successo
+                    ref_match = re.search(r"Numero di riferimento: ([a-zA-Z0-9-]+)", result_message)
+                    if ref_match:
+                        reference_number = ref_match.group(1)
+                        # Imposta i flag per il prossimo turno
+                        update_payload["awaiting_accessories_update"] = True
+                        update_payload["last_created_ref"] = reference_number
+
+                        # --- MODIFICA: Unisci la domanda al messaggio di conferma ---
+                        follow_up_question = "\n\nVuole aggiungere accessori supplementari (es. sedie, proiettore) o modificare il numero di partecipanti?"
+                        
+                        last_ai_message = None
+                        # Cerca l'ultimo messaggio di testo dell'AI nella risposta corrente
+                        for i in reversed(range(len(agent_response_dict["messages"]))):
+                            message = agent_response_dict["messages"][i]
+                            if isinstance(message, AIMessage) and not getattr(message, 'tool_calls', None):
+                                last_ai_message = message
+                                break
+                        
+                        if last_ai_message and last_ai_message.content:
+                            last_ai_message.content += follow_up_question
+                            logging.info("enhanced_react_agent_node: Aggiunta domanda di follow-up al messaggio di conferma esistente.")
+                        else:
+                            # Fallback se non c'è un messaggio di testo a cui appendersi
+                            follow_up_message = AIMessage(content=follow_up_question.strip())
+                            agent_response_dict["messages"].append(follow_up_message)
+                            logging.warning("enhanced_react_agent_node: Nessun messaggio AI di conferma trovato, creata nuova domanda di follow-up.")
+                        # --- FINE MODIFICA ---
+
+                        logging.info(f"enhanced_react_agent_node: Prenotazione creata ({reference_number}). Impostato stato per aggiornamento accessori.")
+                    else:
+                        logging.warning("enhanced_react_agent_node: Messaggio di successo da create_reservation ma numero di riferimento non trovato.")
+                break # Trovata la chiamata a create_reservation, esci dal loop
+
+    return {**agent_response_dict, **update_payload}
+
+# 🛠️ Crea il grafo
+# Nodi principali del flusso
+INITIAL_PROCESSING_NODE_NAME = "initial_processor"
+GET_ACCESSORIES_NODE_NAME = "get_accessories_direct"
+MAIN_AGENT_NODE_NAME = "main_agent_flow_node" # Rinominiamo per chiarezza
+
 graph_builder = StateGraph(State)
-graph_builder.add_node("agent", agent_node)
-graph_builder.add_node("auto_book_processor", auto_book_processor_node) # Nuovo nodo
+graph_builder.add_node(INITIAL_PROCESSING_NODE_NAME, initial_processing_node)
+graph_builder.add_node(GET_ACCESSORIES_NODE_NAME, get_accessories_node)
+graph_builder.add_node(MAIN_AGENT_NODE_NAME, enhanced_react_agent_node) # Il tuo agente ReAct principale
 
-graph_builder.add_edge(START, "agent")
+graph_builder.add_edge(START, INITIAL_PROCESSING_NODE_NAME)
 
-# Dopo agent_node, controlla se è necessario fare una prenotazione automatica
+# Condizione dopo initial_processor
+def check_if_accessories_needed_cond(state: State) -> str:
+    if state.get("needs_initial_accessories_check"):
+        logger.info("Condizione: needs_initial_accessories_check è TRUE -> get_accessories_direct")
+        return "get_accessories_needed"
+    logger.info("Condizione: needs_initial_accessories_check è FALSE -> main_agent_flow")
+    return "continue_to_main_flow"
+
 graph_builder.add_conditional_edges(
-    "agent", # Nodo di partenza della condizione
-    should_auto_book, # Funzione che decide il percorso
+    INITIAL_PROCESSING_NODE_NAME,
+    check_if_accessories_needed_cond,
     {
-        "auto_book": "auto_book_processor",   # Se "auto_book", vai al nodo processore
-        "continue_normally": END              # Altrimenti, la conversazione termina (l'agente ha già risposto)
+        "get_accessories_needed": GET_ACCESSORIES_NODE_NAME,
+        "continue_to_main_flow": MAIN_AGENT_NODE_NAME
     }
 )
-
-# Dopo che auto_book_processor ha preparato la chiamata tool, torna all'agente per eseguirla
-graph_builder.add_edge("auto_book_processor", "agent")
+graph_builder.add_edge(GET_ACCESSORIES_NODE_NAME, MAIN_AGENT_NODE_NAME)
+graph_builder.add_edge(MAIN_AGENT_NODE_NAME, END) # Dopo il nodo agente principale, il turno finisce.
 
 graph = graph_builder.compile()
+
+# 🚀 Nodo Agente Principale (chiamato da FastAPI) - MODIFICATO per usare il grafo compilato
+def agent_node(state: State) -> State:
+    """Esegue il grafo compilato con lo stato fornito."""
+    logging.debug(f"🚀 agent_node (via grafo) IN: { {k: v for k, v in state.items() if k != 'messages'} }")
+    
+    # I messaggi in input da FastAPI sono dizionari JSON.
+    # State(messages=...) con add_messages dovrebbe gestire la conversione in oggetti BaseMessage.
+    # Per sicurezza, logghiamo i messaggi come vengono ricevuti prima che il grafo li processi.
+    if "messages" in state and isinstance(state["messages"], list):
+        # Non possiamo usare serialize_messages qui se sono già dict, darebbe errore.
+        # Logghiamo una rappresentazione sicura.
+        try:
+            logging.debug(f"📨 Messaggi IN (per grafo, raw): {json.dumps(state['messages'], indent=2, ensure_ascii=False)}")
+        except TypeError:
+            logging.debug(f"📨 Messaggi IN (per grafo, raw): {str(state['messages'])}")
+
+    try:
+        # Invoca il grafo compilato
+        response_from_graph = graph.invoke(state)
+        logging.debug(f"📬 Risposta Grafo (da invoke): {json.dumps(response_from_graph, default=str, indent=2, ensure_ascii=False)}")
+    except Exception as e:
+        logging.error(f"❌ Errore durante graph.invoke in agent_node: {e}", exc_info=True)
+        error_message_content = f"Si è verificato un errore interno durante l'elaborazione: {e}"
+        current_messages_from_input_state = state.get("messages", [])
+        # Assicurati che current_messages_from_input_state sia una lista di BaseMessage o dict
+        # Se sono dict, convertili prima di aggiungere AIMessage, o assicurati che add_messages lo faccia.
+        # Per semplicità, assumiamo che add_messages gestisca i dict in input allo State.
+        updated_messages_list = current_messages_from_input_state + [AIMessage(content=error_message_content)]
+        
+        error_state_to_return: State = {**state, "messages": serialize_messages(updated_messages_list)}
+        return error_state_to_return
+
+    final_messages_from_graph = response_from_graph.get("messages", [])
+    serialized_output_messages = serialize_messages(final_messages_from_graph)
+    final_state_output: State = {**response_from_graph, "messages": serialized_output_messages}
+    if "auto_book_target" in final_state_output: del final_state_output["auto_book_target"]
+
+    logging.debug(f"✅ agent_node (via grafo) OUT: {{k: v for k, v in final_state_output.items() if k != 'messages'}}")
+    logging.debug(f"📩 Messaggi OUT (da grafo, serializzati): {json.dumps(final_state_output['messages'], indent=2, ensure_ascii=False)}")
+    return final_state_output
 
 # Funzione per eseguire il grafo e stampare output - INVARIATO
 def run_graph_interaction(initial_state: State) -> State:
@@ -1224,9 +1256,7 @@ def main():
         print(" Autenticazione riuscita!")
         logging.info(f"Token iniziale: {current_session_token[:5]}..., UserID: {current_user_id}")
 
-        # Messaggio di benvenuto
-        welcome_message = AIMessage(content="Benvenuto nel sistema di prenotazione risorse. Come posso aiutarti oggi?")
-        message_history.append(welcome_message) # Aggiungi alla cronologia messaggi
+       
 
         # Inizia il loop interazione
         while True:
@@ -1292,7 +1322,23 @@ if __name__ == "__main__":
         print(json.dumps(response))
         
     except Exception as e:
-        print(json.dumps({"error": str(e)}), file=sys.stderr)
-        sys.exit(1)
         logging.error(f"Errore generico: {e}", exc_info=True)
-        print("⚠️ Errore generico. Riprova.")
+        # Restituisci l'errore come JSON per il frontend
+        print(json.dumps({"error": f"Errore interno del server: {str(e)}"}), file=sys.stderr)
+        sys.exit(1) # Esci con codice di errore
+
+if __name__ == "__main__":
+    # Configura il logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    # Imposta un livello più basso per i log di librerie rumorose se necessario
+    # logging.getLogger("httpx").setLevel(logging.WARNING) # Commentato per debug più facile
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("langchain_core").setLevel(logging.WARNING)
+    logging.getLogger("langchain").setLevel(logging.WARNING)
+    logging.getLogger("dateparser").setLevel(logging.WARNING) # dateparser può essere rumoroso
+  
+  
+    # Esegui la funzione principale
+    main()
+  
