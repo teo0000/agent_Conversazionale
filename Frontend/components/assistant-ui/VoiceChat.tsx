@@ -221,12 +221,24 @@ const VoiceChat: React.FC<{
         <>
             {processingAudio && !responseText && (
                 <div className="flex justify-start w-full items-center gap-3 mt-2 mb-1">
-                    <div className="bg-white/90 dark:bg-zinc-900/80 shadow-lg rounded-full p-2 flex flex-col items-center animate-fade-in-up transition-all duration-700 min-w-[56px] min-h-[56px] max-w-[56px] max-h-[56px] justify-center">
-                        <div className="bg-blue-100 dark:bg-blue-900 rounded-full p-1 relative flex items-center justify-center w-8 h-8">
-                            <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24">
-                                <circle className="opacity-20" cx="12" cy="12" r="7" stroke="#2563eb" strokeWidth="3" fill="none" />
-                                <path className="opacity-80" fill="#2563eb" d="M4 12a8 8 0 018-8v2z" />
-                            </svg>
+                    <div className="relative flex items-center justify-center">
+                        {/* Spinner path che ingloba tutto il contenuto centrale */}
+                        <svg
+                            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 animate-spin"
+                            width="72" height="72" viewBox="0 0 24 24"
+                            style={{ zIndex: 1 }}
+                        >
+                            {/* Spinner path rimosso definitivamente */}
+                        </svg>
+                        <div className="bg-white/90 dark:bg-zinc-900/80 shadow-lg rounded-full p-2 flex flex-col items-center animate-fade-in-up transition-all duration-700 min-w-[56px] min-h-[56px] max-w-[56px] max-h-[56px] justify-center" style={{ zIndex: 2 }}>
+                            {/* Tutto il contenuto centrale viene inglobato dallo spinner esterno */}
+                            <div className="bg-blue-100 dark:bg-blue-900 rounded-full p-1 relative flex items-center justify-center w-8 h-8">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <circle cx="12" cy="12" r="12" fill="#2563eb" fillOpacity="0.15"></circle>
+                                    <path d="M12 7a3 3 0 0 1 3 3v1a3 3 0 0 1-6 0v-1a3 3 0 0 1 3-3zm0 10c-2.67 0-8 1.34-8 4v1h16v-1c0-2.66-5.33-4-8-4z" fill="#2563eb"></path>
+                                </svg>
+                                {/* RIMOSSO LO SPINNER PICCOLO INTERNO */}
+                            </div>
                         </div>
                     </div>
                     <span className="text-sm font-medium text-blue-700 dark:text-blue-300 animate-pulse ml-1">Sto trascrivendo l'audio...</span>

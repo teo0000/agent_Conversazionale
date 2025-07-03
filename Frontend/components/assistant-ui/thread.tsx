@@ -1,3 +1,5 @@
+// Context globale per passare l'handler di click input dal ThreadWelcome
+export const WelcomeInputContext = React.createContext<(() => void) | null>(null);
 import React from "react";
 import {
   ActionBarPrimitive,
@@ -23,20 +25,21 @@ import { cleanTextForProcessing } from "../../lib/text-utils";
 
 import { Button } from "@/components/ui/button";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
+
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import VoiceChat from "../assistant-ui/VoiceChat";
 
 export const Thread: FC = () => {
+  // Stato dei messaggi della chat
   const [showVoiceChat, setShowVoiceChat] = React.useState(false);
   const [recording, setRecording] = React.useState(false);
   const [responseText, setResponseText] = React.useState<string | null>(null);
-  // Stato dei messaggi della chat
   const [messages, setMessages] = React.useState<{ role: string; content: string }[]>([]);
   // Stato per il valore della textarea
   const [inputValue, setInputValue] = React.useState("");
   // Stato per mostrare il loader di caricamento (sia per voce che testo)
   const [isLoading, setIsLoading] = React.useState(false);
-  // Stato per la riproduzione audio TTS
+  // Stato per la riproduzione audio TTS dei messaggi assistant (NON per il benvenuto)
   const [isAudioPlaying, setIsAudioPlaying] = React.useState(false);
   const ttsAudioRef = React.useRef<HTMLAudioElement | null>(null);
 
@@ -214,20 +217,21 @@ export const Thread: FC = () => {
       }}
     >
       <ThreadPrimitive.Viewport className="flex h-full flex-col items-center overflow-y-scroll scroll-smooth bg-inherit px-4 pt-8">
+        {/* Passa la logica TTS e animazione al box di benvenuto */}
         <ThreadWelcome />
 
         {/* <ThreadPrimitive.Messages
-          components={{
-            UserMessage: UserMessage,
-            EditComposer: EditComposer,
-            AssistantMessage: AssistantMessage,
-          }}
-        /> */}
+            components={{
+              UserMessage: UserMessage,
+              EditComposer: EditComposer,
+              AssistantMessage: AssistantMessage,
+            }}
+          /> */}
         {/* Rendering personalizzato dei messaggi */}
         {messages.map((msg, idx) => {
           if (msg.role === "user") {
             return (
-              <div key={idx} className="flex justify-end w-full max-w-[var(--thread-max-width)] py-4">
+              <div key={idx} className="flex justify-end w-full max-w-[var(--thread-max-width)] py-4 items-start gap-2">
                 <div className="bg-muted text-foreground max-w-[calc(var(--thread-max-width)*0.8)] break-words rounded-3xl px-5 py-2.5">
                   {msg.content}
                 </div>
@@ -235,9 +239,46 @@ export const Thread: FC = () => {
             );
           } else if (msg.role === "assistant") {
             return (
-              <div key={idx} className="flex justify-start w-full max-w-[var(--thread-max-width)] py-4">
+              <div key={idx} className="flex justify-start w-full max-w-[var(--thread-max-width)] py-4 items-start gap-2">
+                {/* Avatar cartoon a sinistra */}
+                <div className="flex-shrink-0 flex items-center justify-center" style={{ width: 40, height: 40 }}>
+                  <svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    {/* Testa */}
+                    <ellipse cx="20" cy="20" rx="16" ry="16" fill="#ffe0b2" stroke="#e0a15c" strokeWidth="2" />
+                    {/* Capelli */}
+                    <path d="M8 18 Q12 7 20 7 Q28 7 32 18 Z" fill="#a67c52" />
+                    {/* Occhi */}
+                    <ellipse cx="14.5" cy="20" rx="2" ry="2.5" fill="#222" />
+                    <ellipse cx="25.5" cy="20" rx="2" ry="2.5" fill="#222" />
+                    {/* Sopracciglia */}
+                    <rect x="12.5" y="16.5" width="4" height="0.7" rx="0.35" fill="#a67c52" />
+                    <rect x="23.5" y="16.5" width="4" height="0.7" rx="0.35" fill="#a67c52" />
+                    {/* Bocca animata se isAudioPlaying */}
+                    <g>
+                      <ellipse
+                        cx="20"
+                        cy="27.5"
+                        rx="4.2"
+                        ry="1.5"
+                        fill="#e57373"
+                        style={{
+                          transformOrigin: '20px 27.5px',
+                          animation: (isAudioPlaying ? 'mouthMove 0.4s infinite' : 'none')
+                        } as React.CSSProperties}
+                      />
+                    </g>
+                  </svg>
+                  {/* Animazione bocca */}
+                  <style>{`
+                      @keyframes mouthMove {
+                        0% { transform: scaleY(1); }
+                        50% { transform: scaleY(2.2); }
+                        100% { transform: scaleY(1); }
+                      }
+                    `}</style>
+                </div>
                 <div className="text-foreground bg-blue-100 dark:bg-blue-900 max-w-[calc(var(--thread-max-width)*0.8)] break-words leading-7 rounded-3xl px-5 py-2.5">
-                  {msg.content}
+                  <MarkdownText text={msg.content} />
                 </div>
               </div>
             );
@@ -264,15 +305,21 @@ export const Thread: FC = () => {
           {isLoading && (
             <div className="flex justify-start w-full items-center gap-3">
               <div className="bg-white/90 dark:bg-zinc-900/80 shadow-lg rounded-full p-2 flex flex-col items-center animate-fade-in-up transition-all duration-700 mt-2 mb-1 min-w-[56px] min-h-[56px] max-w-[56px] max-h-[56px] justify-center">
-                <div className="bg-blue-100 dark:bg-blue-900 rounded-full p-1 relative flex items-center justify-center w-8 h-8">
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <circle cx="12" cy="12" r="12" fill="#2563eb" fillOpacity="0.15" />
-                    <path d="M12 7a3 3 0 0 1 3 3v1a3 3 0 0 1-6 0v-1a3 3 0 0 1 3-3zm0 10c-2.67 0-8 1.34-8 4v1h16v-1c0-2.66-5.33-4-8-4z" fill="#2563eb" />
-                  </svg>
-                  {/* Spinner sopra l'avatar */}
-                  <svg className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 animate-spin" width="16" height="16" viewBox="0 0 24 24">
-                    <circle className="opacity-20" cx="12" cy="12" r="7" stroke="#2563eb" strokeWidth="3" fill="none" />
-                    <path className="opacity-80" fill="#2563eb" d="M4 12a8 8 0 0 1 8-8v2z" />
+                <div className="bg-blue-100 dark:bg-blue-900 rounded-full p-1 relative flex items-center justify-center w-12 h-12">
+                  {/* Avatar cartoon con espressione facciale neutra/sorpresa durante il caricamento */}
+                  <svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    {/* Testa */}
+                    <ellipse cx="20" cy="20" rx="16" ry="16" fill="#ffe0b2" stroke="#e0a15c" strokeWidth="2" />
+                    {/* Capelli */}
+                    <path d="M8 18 Q12 7 20 7 Q28 7 32 18 Z" fill="#a67c52" />
+                    {/* Occhi leggermente "sorpresi" */}
+                    <ellipse cx="14.5" cy="20" rx="2" ry="2.5" fill="#222" />
+                    <ellipse cx="25.5" cy="20" rx="2" ry="2.5" fill="#222" />
+                    {/* Sopracciglia leggermente alzate */}
+                    <rect x="12.5" y="15.5" width="4" height="0.7" rx="0.35" fill="#a67c52" />
+                    <rect x="23.5" y="15.5" width="4" height="0.7" rx="0.35" fill="#a67c52" />
+                    {/* Bocca neutra/sorpresa (cerchio piccolo) */}
+                    <ellipse cx="20" cy="28" rx="2" ry="2.2" fill="#e57373" />
                   </svg>
                 </div>
               </div>
@@ -312,12 +359,13 @@ export const Thread: FC = () => {
             setRecording(false);
             setShowVoiceChat(false);
           }}
-          onProcessTranscribedText={(text) => handleSend(text, true)}
+          onProcessTranscribedText={(text: string) => handleSend(text, true)}
         />
       )}
     </ThreadPrimitive.Root>
   );
 };
+
 
 const ThreadScrollToBottom: FC = () => {
   return (
@@ -334,27 +382,133 @@ const ThreadScrollToBottom: FC = () => {
 };
 
 const ThreadWelcome: FC = () => {
+  // Testo di benvenuto
+  const welcomeText = `Ciao! Sono il tuo assistente virtuale.\nPosso gestire le tue prenotazioni:\nIl servizio è operativo dalle 08:00 alle 18:00\n(l’ultima fascia è dalle 17:00 alle 18:00, quindi alle 18:00 non si accettano nuove richieste).\nCome posso supportarti oggi?`;
+
+  // Stato per animazione bocca e riproduzione TTS SOLO per il benvenuto
+  const [isWelcomeAudioPlaying, setIsWelcomeAudioPlaying] = React.useState(false);
+  const welcomeAudioRef = React.useRef<HTMLAudioElement | null>(null);
+  const [welcomePlayed, setWelcomePlayed] = React.useState(false);
+  const [welcomeAudioFailed, setWelcomeAudioFailed] = React.useState(false);
+
+  // Prova a riprodurre automaticamente all'avvio
+  React.useEffect(() => {
+    if (!welcomePlayed) {
+      (async () => {
+        try {
+          const ttsRes = await fetch("http://localhost:8000/agent/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: welcomeText }),
+          });
+          if (ttsRes.ok) {
+            const audioBlob = await ttsRes.blob();
+            const audioUrl = URL.createObjectURL(audioBlob);
+            const audio = new Audio(audioUrl);
+            welcomeAudioRef.current = audio;
+            setIsWelcomeAudioPlaying(true);
+            audio.play().catch(e => {
+              setWelcomeAudioFailed(true);
+              setIsWelcomeAudioPlaying(false);
+              // Non serve loggare qui
+            });
+            audio.onended = () => {
+              setIsWelcomeAudioPlaying(false);
+              URL.revokeObjectURL(audioUrl);
+              welcomeAudioRef.current = null;
+            };
+          } else {
+            setWelcomeAudioFailed(true);
+          }
+        } catch (e) {
+          setWelcomeAudioFailed(true);
+        }
+      })();
+      setWelcomePlayed(true);
+    }
+  }, [welcomePlayed, welcomeText]);
+
+  // Handler per click sull'input testuale
+  const handleInputClick = React.useCallback(() => {
+    if (welcomeAudioFailed && welcomeAudioRef.current) {
+      // Prova a riprodurre l'audio se non è già in riproduzione
+      welcomeAudioRef.current.play()
+        .then(() => {
+          setIsWelcomeAudioPlaying(true);
+          setWelcomeAudioFailed(false);
+        })
+        .catch(() => {
+          setWelcomeAudioFailed(true);
+        });
+    }
+  }, [welcomeAudioFailed]);
+
+
+
   return (
-    <ThreadPrimitive.Empty>
-      <div className="flex w-full max-w-[var(--thread-max-width)] flex-grow flex-col items-center justify-center">
-        <div className="bg-white/90 dark:bg-zinc-900/80 shadow-lg rounded-2xl p-8 flex flex-col items-center animate-fade-in-up transition-all duration-700 mt-16">
-          <div className="bg-blue-100 dark:bg-blue-900 rounded-full p-3 mb-4">
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <circle cx="12" cy="12" r="12" fill="#2563eb" fillOpacity="0.15" />
-              <path d="M12 7a3 3 0 0 1 3 3v1a3 3 0 0 1-6 0v-1a3 3 0 0 1 3-3zm0 10c-2.67 0-8 1.34-8 4v1h16v-1c0-2.66-5.33-4-8-4z" fill="#2563eb" />
-            </svg>
+    <WelcomeInputContext.Provider value={handleInputClick}>
+      <ThreadPrimitive.Empty>
+        <div className="flex w-full max-w-[var(--thread-max-width)] flex-grow flex-col items-center justify-center">
+          <div className="bg-white/90 dark:bg-zinc-900/80 shadow-lg rounded-2xl p-8 flex flex-col items-center animate-fade-in-up transition-all duration-700 mt-16">
+            <div className="bg-blue-100 dark:bg-blue-900 rounded-full p-3 mb-4">
+              {/* Avatar cartoon con bocca animata solo durante la lettura TTS */}
+              <svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                {/* Testa */}
+                <ellipse cx="20" cy="20" rx="16" ry="16" fill="#ffe0b2" stroke="#e0a15c" strokeWidth="2" />
+                {/* Capelli */}
+                <path d="M8 18 Q12 7 20 7 Q28 7 32 18 Z" fill="#a67c52" />
+                {/* Occhi */}
+                <ellipse cx="14.5" cy="20" rx="2" ry="2.5" fill="#222" />
+                <ellipse cx="25.5" cy="20" rx="2" ry="2.5" fill="#222" />
+                {/* Sopracciglia */}
+                <rect x="12.5" y="16.5" width="4" height="0.7" rx="0.35" fill="#a67c52" />
+                <rect x="23.5" y="16.5" width="4" height="0.7" rx="0.35" fill="#a67c52" />
+                {/* Bocca animata se isWelcomeAudioPlaying */}
+                <g>
+                  <ellipse
+                    cx="20"
+                    cy="27.5"
+                    rx="4.2"
+                    ry="1.5"
+                    fill="#e57373"
+                    style={{
+                      transformOrigin: '20px 27.5px',
+                      animation: (isWelcomeAudioPlaying ? 'mouthMove 0.4s infinite' : 'none')
+                    } as React.CSSProperties}
+                  />
+                </g>
+              </svg>
+              <style>{`
+                @keyframes mouthMove {
+                  0% { transform: scaleY(1); }
+                  50% { transform: scaleY(2.2); }
+                  100% { transform: scaleY(1); }
+                }
+              `}</style>
+            </div>
+            <h2 className="text-xl font-bold text-center mb-2 text-blue-700 dark:text-blue-300">Ciao! Sono il tuo assistente virtuale.</h2>
+            <p className="text-center text-base text-zinc-700 dark:text-zinc-200 max-w-lg">
+              Posso gestire le tue prenotazioni:<br />
+              <span className="font-semibold">Il servizio è operativo dalle 08:00 alle 18:00</span><br />
+              (l’ultima fascia è dalle 17:00 alle 18:00, quindi alle 18:00 non si accettano nuove richieste).<br />
+              <span className="block mt-2">Come posso supportarti oggi?</span>
+            </p>
+            {welcomeAudioFailed && (
+              <div className="mt-4">
+                <button
+                  className="px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700 transition"
+                  onClick={() => handleInputClick()}
+                >
+                  ▶️ Riprova audio benvenuto
+                </button>
+                <div className="text-xs text-zinc-500 mt-1">Clicca qui o sull'area di input per ascoltare il benvenuto</div>
+              </div>
+            )}
           </div>
-          <h2 className="text-xl font-bold text-center mb-2 text-blue-700 dark:text-blue-300">Ciao! Sono il tuo assistente virtuale.</h2>
-          <p className="text-center text-base text-zinc-700 dark:text-zinc-200 max-w-lg">
-            Posso gestire le tue prenotazioni:<br />
-            <span className="font-semibold">Il servizio è operativo dalle 08:00 alle 18:00</span><br />
-            (l’ultima fascia è dalle 17:00 alle 18:00, quindi alle 18:00 non si accettano nuove richieste).<br />
-            <span className="block mt-2">Come posso supportarti oggi?</span>
-          </p>
+          <ThreadWelcomeSuggestions />
         </div>
-        <ThreadWelcomeSuggestions />
-      </div>
-    </ThreadPrimitive.Empty>
+      </ThreadPrimitive.Empty>
+    </WelcomeInputContext.Provider>
   );
 };
 
@@ -368,6 +522,9 @@ const ThreadWelcomeSuggestions: FC = () => {
 };
 
 // Modifica il componente Composer per gestire inputValue e setInputValue
+// Context per passare l'handler di click input dal ThreadWelcome
+
+
 const Composer: FC<{
   onVoiceClick?: () => void;
   voiceActive?: boolean;
@@ -380,6 +537,8 @@ const Composer: FC<{
   onSend: () => void;
   disabled?: boolean;
 }> = ({ onVoiceClick, voiceActive, recording, onStart, onStop, responseText, inputValue, setInputValue, onSend, disabled }) => {
+  // Recupera l'handler dal context, se presente
+  const handleWelcomeInputClick = React.useContext(WelcomeInputContext);
   return (
     <ComposerPrimitive.Root asChild>
       <form
@@ -398,6 +557,7 @@ const Composer: FC<{
           onChange={e => setInputValue(e.target.value)}
           name="input"
           disabled={disabled}
+          onClick={() => { if (typeof handleWelcomeInputClick === 'function') handleWelcomeInputClick(); }}
         />
         <ComposerAction
           onVoiceClick={onVoiceClick}
