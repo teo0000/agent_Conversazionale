@@ -24,6 +24,7 @@ import { cleanTextForProcessing } from "../../lib/text-utils";
 import { Button } from "@/components/ui/button";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
+import RealisticAvatar from "@/components/assistant-ui/AnimatedAvatar";
 import VoiceChat from "../assistant-ui/VoiceChat";
 
 export const Thread: FC = () => {
@@ -337,12 +338,15 @@ const ThreadWelcome: FC = () => {
   return (
     <ThreadPrimitive.Empty>
       <div className="flex w-full max-w-[var(--thread-max-width)] flex-grow flex-col items-center justify-center">
-        <div className="bg-white/90 dark:bg-zinc-900/80 shadow-lg rounded-2xl p-8 flex flex-col items-center animate-fade-in-up transition-all duration-700 mt-16">
-          <div className="bg-blue-100 dark:bg-blue-900 rounded-full p-3 mb-4">
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <circle cx="12" cy="12" r="12" fill="#2563eb" fillOpacity="0.15" />
-              <path d="M12 7a3 3 0 0 1 3 3v1a3 3 0 0 1-6 0v-1a3 3 0 0 1 3-3zm0 10c-2.67 0-8 1.34-8 4v1h16v-1c0-2.66-5.33-4-8-4z" fill="#2563eb" />
-            </svg>
+        <div className="bg-white/90 dark:bg-zinc-900/80 shadow-lg rounded-2xl p-8 flex flex-col items-center animate-fade-in-up transition-all duration-700 mt-16 text-center">
+          <div className="mb-4">
+            <RealisticAvatar
+              className="w-24 h-24 rounded-full border-2 border-blue-200 dark:border-blue-800 shadow-lg"
+              imageClassName="rounded-full"
+              objectFit="cover"
+              videoUrl=""
+              onVideoEnd={() => {}}
+            />
           </div>
           <h2 className="text-xl font-bold text-center mb-2 text-blue-700 dark:text-blue-300">Ciao! Sono il tuo assistente virtuale.</h2>
           <p className="text-center text-base text-zinc-700 dark:text-zinc-200 max-w-lg">
