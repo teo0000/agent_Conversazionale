@@ -24,13 +24,14 @@ import { cleanTextForProcessing } from "../../lib/text-utils";
 import { Button } from "@/components/ui/button";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
-import RealisticAvatar from "@/components/assistant-ui/AnimatedAvatar";
+// import RealisticAvatar from "@/components/assistant-ui/AnimatedAvatar";
 import VoiceChat from "../assistant-ui/VoiceChat";
 
 export const Thread: FC = () => {
   const [showVoiceChat, setShowVoiceChat] = React.useState(false);
   const [recording, setRecording] = React.useState(false);
   const [responseText, setResponseText] = React.useState<string | null>(null);
+  const [videoUrl, setVideoUrl] = React.useState<string>("");
   // Stato dei messaggi della chat
   const [messages, setMessages] = React.useState<{ role: string; content: string }[]>([]);
   // Stato per il valore della textarea
@@ -175,12 +176,16 @@ export const Thread: FC = () => {
               });
               console.error("[Thread] Error during TTS fetch operation for assistant response:", ttsErr);
             }
+            // Dopo aver gestito TTS, genera il video D-ID
+            
           } else {
             setMessages(prev => {
               const updated = [...prev, { role: "error", content: "L'assistente ha risposto, ma il formato del messaggio non è stato riconosciuto. Dati: " + JSON.stringify(chatData).substring(0, 200) + "..." }];
               return updated;
             });
           }
+
+          
         } else {
           const errText = await chatRes.text();
           setMessages(prev => {
@@ -235,10 +240,19 @@ export const Thread: FC = () => {
               </div>
             );
           } else if (msg.role === "assistant") {
+            const isLastMessage = idx === messages.length - 1;
+            const isThisAudioPlaying = isLastMessage && isAudioPlaying;
             return (
-              <div key={idx} className="flex justify-start w-full max-w-[var(--thread-max-width)] py-4">
+              <div key={idx} className="flex justify-start w-full max-w-[var(--thread-max-width)] py-4 items-end gap-3">
+                {/* <RealisticAvatar
+                  className="w-10 h-10 rounded-full border-2 border-blue-200 dark:border-blue-800 shadow-lg"
+                  imageClassName="rounded-full"
+                  objectFit="cover"
+                  videoUrl={videoUrl}
+                  onVideoEnd={() => setVideoUrl("")}
+                /> */}
                 <div className="text-foreground bg-blue-100 dark:bg-blue-900 max-w-[calc(var(--thread-max-width)*0.8)] break-words leading-7 rounded-3xl px-5 py-2.5">
-                  {msg.content}
+                  <MarkdownText text={msg.content} />
                 </div>
               </div>
             );
@@ -340,13 +354,13 @@ const ThreadWelcome: FC = () => {
       <div className="flex w-full max-w-[var(--thread-max-width)] flex-grow flex-col items-center justify-center">
         <div className="bg-white/90 dark:bg-zinc-900/80 shadow-lg rounded-2xl p-8 flex flex-col items-center animate-fade-in-up transition-all duration-700 mt-16 text-center">
           <div className="mb-4">
-            <RealisticAvatar
+            {/* <RealisticAvatar
               className="w-24 h-24 rounded-full border-2 border-blue-200 dark:border-blue-800 shadow-lg"
               imageClassName="rounded-full"
               objectFit="cover"
               videoUrl=""
-              onVideoEnd={() => {}}
-            />
+              onVideoEnd={() => { }}
+            /> */}
           </div>
           <h2 className="text-xl font-bold text-center mb-2 text-blue-700 dark:text-blue-300">Ciao! Sono il tuo assistente virtuale.</h2>
           <p className="text-center text-base text-zinc-700 dark:text-zinc-200 max-w-lg">
@@ -518,7 +532,7 @@ const AssistantMessage: FC = () => {
   return (
     <MessagePrimitive.Root className="grid grid-cols-[auto_auto_1fr] grid-rows-[auto_1fr] relative w-full max-w-[var(--thread-max-width)] py-4">
       <div className="text-foreground max-w-[calc(var(--thread-max-width)*0.8)] break-words leading-7 col-span-2 col-start-2 row-start-1 my-1.5">
-        <MessagePrimitive.Content components={{ Text: MarkdownText }} />
+        <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </div>
 
       <AssistantActionBar />

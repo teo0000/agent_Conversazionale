@@ -1,56 +1,71 @@
-import React, { useEffect, useRef } from 'react';
-import Image from 'next/image';
-import { cn } from '@/lib/utils';
 
-type AnimatedAvatarProps = {
-  videoUrl: string | null;
-  onVideoEnd: () => void;
-  className?: string;
-  imageClassName?: string;
-  objectFit?: 'cover' | 'contain' | 'fill' | 'none' | 'scale-down';
-};
+import React, { useEffect, useRef } from "react";
+import { Avatar } from '@readyplayerme/visage';
 
-export const AnimatedAvatar: React.FC<AnimatedAvatarProps> = ({
-  videoUrl,
-  onVideoEnd,
-  className,
-  imageClassName,
-  objectFit = 'cover',
-}) => {
-  const videoRef = useRef<HTMLVideoElement>(null);
+const avatarId = "68722574bf6cc44ef5b3e85f";
+const avatarUrl = `https://models.readyplayer.me/${avatarId}.glb`;
 
-  useEffect(() => {
-    if (videoUrl && videoRef.current) {
-      videoRef.current.load();
-      videoRef.current.play().catch(e => console.error("Errore durante la riproduzione del video dell'avatar:", e));
-    }
-  }, [videoUrl]);
+/**
+ * AnimatedAvatar: avatar 3D con animazione braccia e viso (jaw) durante il parlato.
+ * L'animazione viene attivata tramite la prop isSpeaking.
+ */
+export default function AnimatedAvatar({ isSpeaking = false }: { isSpeaking?: boolean }) {
+    const jawBoneRef = useRef<any>(null);
+    const leftArmRef = useRef<any>(null);
+    const rightArmRef = useRef<any>(null);
+    const modelRef = useRef<any>(null);
 
-  return (
-    <div className={cn('relative', className)}>
-      {videoUrl ? (
-        <video
-          ref={videoRef}
-          src={videoUrl}
-          onEnded={onVideoEnd}
-          className={cn('h-full w-full', imageClassName)}
-          style={{ objectFit }}
-          playsInline
-          muted={false} // Assicurati che l'audio del video sia riprodotto
-        />
-      ) : (
-        <Image
-          src={process.env.NEXT_PUBLIC_AVATAR_URL || '/images/avatar.png'}
-          alt="Assistente virtuale"
-          fill
-          style={{ objectFit }}
-          className={cn(imageClassName)}
-          priority
-        />
-      )}
-    </div>
-  );
-};
+    // Polling per trovare il modello 3D ReadyPlayerMe
+    useEffect(() => {
+        let interval: NodeJS.Timeout;
+        let tentativi = 0;
+        function cercaModello() {
+            // Cerca la scena three.js globale (ReadyPlayerMe la espone su window.scene)
+            // oppure cerca window.avatar/model, oppure cerca tra i renderer
+            // Qui tentiamo con window.scene
+            // @ts-ignore
+            const scene = (window as any).scene;
+            if (scene && scene.children) {
+                // Cerca il root mesh/avatar
+                const avatar = scene.children.find((obj: any) => obj.type === "Group" && obj.children.some((c: any) => c.name && c.name.toLowerCase().includes("armature")));
+                if (avatar) {
+                    modelRef.current = avatar;
+                    jawBoneRef.current = avatar.getObjectByName("Head_jaw") || avatar.getObjectByName("Jaw") || null;
+                    leftArmRef.current = avatar.getObjectByName("LeftArm") || avatar.getObjectByName("mixamorig:LeftArm") || null;
+                    rightArmRef.current = avatar.getObjectByName("RightArm") || avatar.getObjectByName("mixamorig:RightArm") || null;
+                    clearInterval(interval);
+                }
+            }
+            tentativi++;
+            if (tentativi > 50) clearInterval(interval); // timeout dopo 5s
+        }
+        interval = setInterval(cercaModello, 100);
+        return () => clearInterval(interval);
+    }, []);
 
-export default AnimatedAvatar;
+    useEffect(() => {
+        let frameId: number;
+        let t = 0;
+        function animate() {
+            t += 0.1;
+            // Muovi la jaw (mandibola) su/giù per simulare il parlato
+            if (jawBoneRef.current) {
+                jawBoneRef.current.rotation.x = isSpeaking ? 0.15 + 0.07 * Math.sin(t * 8) : 0;
+            }
+            // Muovi le braccia (oscillazione semplice)
+            if (leftArmRef.current) {
+                leftArmRef.current.rotation.z = isSpeaking ? 0.2 * Math.sin(t * 2) : 0;
+            }
+            if (rightArmRef.current) {
+                rightArmRef.current.rotation.z = isSpeaking ? -0.2 * Math.sin(t * 2) : 0;
+            }
+            frameId = requestAnimationFrame(animate);
+        }
+        animate();
+        return () => cancelAnimationFrame(frameId);
+    }, [isSpeaking]);
 
+    return (
+        <Avatar modelSrc={avatarUrl} style={{ width: 220, height: 550 }} shadows />
+    );
+}

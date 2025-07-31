@@ -39,6 +39,7 @@ LIBREBOOKING_API_URL = "http://localhost/Web/Services/index.php"
 class State(TypedDict):
     session_token: Optional[str]
     user_id: Optional[str]
+    client_timezone: Optional[str] = None # Aggiunto per tracciare il fuso orario del client
     messages: Annotated[list, add_messages]
     # Campi non più usati attivamente
     reference_number_to_delete: Optional[str] = None
@@ -104,12 +105,13 @@ def get_reservation(session_token: str, user_id: str, reference_number: str) -> 
     **Step 2:** L'agente DEVE mostrare i dettagli restituiti all'utente.
     **Step 3:** L'agente DEVE poi chiedere ESATTAMENTE: 'Vuoi cancellare questa prenotazione? Rispondi "sì" per confermare.'
     NON procedere alla cancellazione senza questi passaggi.
+    **Output:** Restituisce una stringa JSON con i dettagli della prenotazione, inclusi gli orari ISO UTC per un uso non ambiguo da parte dell'agente.
     """
     if not all([session_token, user_id, reference_number]): return "❌ Errore: Mancano token, user ID o numero di riferimento."
     if len(reference_number) < 10: return "⚠️ Inserisci un numero di riferimento valido (almeno 10 caratteri)."
     headers = {"X-Booked-SessionToken": session_token, "X-Booked-UserId": user_id}
     try:
-        logging.info(f"get_reservation: Tentativo recupero dettagli per {reference_number}")
+        logger.info(f"get_reservation: Tentativo recupero dettagli per {reference_number}")
         response = requests.get(f"{LIBREBOOKING_API_URL}/Reservations/{reference_number}", headers=headers)
         response.raise_for_status()
         data = response.json()
@@ -118,18 +120,41 @@ def get_reservation(session_token: str, user_id: str, reference_number: str) -> 
         start_date_str = data.get('startDate', 'N/D') # N/D = Non Disponibile
         end_date_str = data.get('endDate', 'N/D')
         title = data.get('title', 'N/D')
+        
+        # Blocco per il parsing sicuro delle date e la creazione dell'output JSON
+        try:
+            local_tz = dateutil.tz.gettz('Europe/Rome')
+            start_dt_utc = dateparser.parse(start_date_str)
+            end_dt_utc = dateparser.parse(end_date_str)
 
-        # Costruisci la stringa dei dettagli includendo l'ID se presente
-        if resource_id:
-            details_string = (f"Risorsa: (ID: {resource_id}), Inizio: {start_date_str}, "
-                              f"Fine: {end_date_str}, Titolo: {title}, Riferimento: {reference_number}")
-        else:
-            details_string = (f"Risorsa: (ID non disponibile), Inizio: {start_date_str}, "
-                              f"Fine: {end_date_str}, Titolo: {title}, Riferimento: {reference_number}")
-            logging.warning(f"get_reservation: resourceId mancante nella risposta API per {reference_number}")
+            if start_dt_utc and end_dt_utc:
+                start_formatted = start_dt_utc.astimezone(local_tz).strftime('%d/%m/%Y alle %H:%M')
+                end_formatted = end_dt_utc.astimezone(local_tz).strftime('%H:%M')
+                date_str = f"{start_formatted} - {end_formatted}"
+                iso_start_utc = start_dt_utc.isoformat()
+                iso_end_utc = end_dt_utc.isoformat()
+            else:
+                date_str = f"{start_date_str} - {end_date_str}"
+                iso_start_utc = start_date_str
+                iso_end_utc = end_date_str
+        except Exception as date_e:
+            logger.warning(f"get_reservation: Errore parsing date per {reference_number}: {date_e}. Uso le stringhe originali.")
+            date_str = f"{start_date_str} - {end_date_str}"
+            iso_start_utc = start_date_str
+            iso_end_utc = end_date_str
 
-        logging.info(f"get_reservation: Dettagli recuperati: {details_string}")
-        return details_string
+        # Crea un dizionario strutturato e convertilo in una stringa JSON
+        details_dict = {
+            "display_message": f"Ecco i dettagli della prenotazione **{reference_number}**:\n\n- **Titolo:** {title}\n- **Risorsa ID:** {resource_id or 'N/A'}\n- **Periodo:** {date_str}",
+            "reference_number": reference_number,
+            "resourceId": resource_id,
+            "iso_start_utc": iso_start_utc,
+            "iso_end_utc": iso_end_utc
+        }
+        json_output = json.dumps(details_dict, ensure_ascii=False)
+        logger.info(f"get_reservation: Dettagli recuperati e formattati in JSON: {json_output}")
+        return json_output
+
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401: return "❌ Errore Autenticazione: Token non valido/scaduto. Riesegui l'autenticazione."
         if e.response.status_code == 404: return f"⚠️ Prenotazione '{reference_number}' non trovata."
@@ -184,9 +209,11 @@ def delete_reservation(session_token: str, user_id: str, reference_number: str) 
 # --- Tool: parse_date ---
 class ParseDateArgs(BaseModel):
     user_input: str = Field(..., description="La stringa fornita dall'utente contenente la data e/o l'ora da interpretare.")
+    client_timezone: Optional[str] = Field(None, description="Il fuso orario IANA del client (es. 'Europe/Rome'). Se non fornito, verrà usato un default. Questo valore dovrebbe essere preso dallo stato della conversazione, se disponibile.")
+
 @tool(args_schema=ParseDateArgs)
-def parse_date(user_input: str) -> str | None:
-    """Interpreta date/ore (anche relative). Output JSON con 'iso_datetime' e 'time_specified'. Imposta mezzanotte se ora non specificata."""
+def parse_date(user_input: str, client_timezone: Optional[str] = None) -> str | None:
+    """Interpreta date/ore (anche relative) nel fuso orario del client. Output JSON con 'iso_datetime' e 'time_specified'. Imposta mezzanotte se ora non specificata."""
     try:
         original_input_lower = user_input.lower()
         processed_input = original_input_lower
@@ -195,13 +222,25 @@ def parse_date(user_input: str) -> str | None:
         processed_input = re.sub(r"\b(alle|ore)\s+(\d{1,2}:\d{2})", r"\2", processed_input, flags=re.IGNORECASE)
         logger.info(f"parse_date: Input='{user_input}', Processed='{processed_input}'")
 
-        # Impostazioni per il parsing delle date - SPOSTATO QUI
+        # --- LOGICA MIGLIORATA PER IL FUSO ORARIO ---
+        tz_str = client_timezone or 'Europe/Rome'  # Default a Roma se non fornito
+        try:
+            tz_info = dateutil.tz.gettz(tz_str)
+            if tz_info is None:
+                logger.warning(f"parse_date: Fuso orario non valido '{tz_str}', fallback a Europe/Rome.")
+                tz_str = 'Europe/Rome'
+                tz_info = dateutil.tz.gettz(tz_str)
+        except Exception:
+            logger.exception(f"parse_date: Errore nel parsing del fuso orario '{tz_str}', fallback a Europe/Rome.")
+            tz_str = 'Europe/Rome'
+            tz_info = dateutil.tz.gettz(tz_str)
+
+        now_in_client_tz = datetime.datetime.now(tz_info)
         settings = {
             'PREFER_DATES_FROM': 'future',
-            'TIMEZONE': 'Europe/Rome',
+            'TIMEZONE': tz_str,
             'RETURN_AS_TIMEZONE_AWARE': True,
-            # 'DATE_ORDER': 'DMY' # Verrà impostato condizionatamente
-            'RELATIVE_BASE': datetime.datetime.now(),  # Usa data e ora attuali del computer
+            'RELATIVE_BASE': now_in_client_tz,
         }
         languages = ['it', 'en']
 
@@ -242,14 +281,16 @@ def parse_date(user_input: str) -> str | None:
         iso_datetime_pattern = r'^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[\+\-]\d{2}:\d{2})?$'
         # Regex per YYYY-MM-DD
         iso_date_pattern = r'^\d{4}-\d{2}-\d{2}$'
+        # Aggiunto pattern per YYYY-MM-DD HH:MM, comune output degli LLM
+        iso_like_datetime_pattern = r'^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}'
 
-        if not (re.match(iso_datetime_pattern, processed_input) or re.match(iso_date_pattern, processed_input)):
+        if not (re.match(iso_datetime_pattern, processed_input) or re.match(iso_date_pattern, processed_input) or re.match(iso_like_datetime_pattern, processed_input)):
             # Se non è una data/datetime ISO stretta, potrebbe essere "DD/MM/YYYY" o linguaggio naturale.
             # In questi casi, specialmente per l'italiano "DD/MM/YYYY", DMY è preferito.
             settings['DATE_ORDER'] = 'DMY'
-            logger.debug(f"parse_date: Input '{processed_input}' non è ISO stretta. Usando DATE_ORDER: DMY.")
+            logger.debug(f"parse_date: Input '{processed_input}' non è in formato ISO. Usando DATE_ORDER: DMY.")
         else:
-            logger.debug(f"parse_date: Input '{processed_input}' sembra ISO. Non usando DATE_ORDER esplicito.")
+            logger.debug(f"parse_date: Input '{processed_input}' riconosciuto come formato ISO. Non verrà usato un DATE_ORDER esplicito.")
 
         # Parsing della data
         logger.debug(f"parse_date: Tentativo parsing con dateparser per '{processed_input}' con impostazioni: {settings}")
@@ -267,8 +308,7 @@ def parse_date(user_input: str) -> str | None:
             target_date = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
 
         # Verifica che la data sia valida e non nel passato
-        now = datetime.datetime.now(target_date.tzinfo)
-        if target_date < now:
+        if target_date < now_in_client_tz:
             logger.warning(f"parse_date: La data '{target_date}' è nel passato. Ignorata.")
             return None
 
@@ -327,27 +367,27 @@ def get_resources(session_token: str, user_id: str) -> list | str:
 class CreateReservationArgs(BaseModel):
     session_token: str = Field(..., description="The valid session token obtained from authentication.")
     user_id: str = Field(..., description="The valid user ID obtained from authentication.")
-    title: str = Field(default="", description="Reservation title (optional).")
+    title: str = Field(default="Reservation", description="Reservation title (optional).")
     description: str = Field(default="", description="Reservation description (optional).")
-    startDateTime: str = Field(..., description='ISO 8601 start date/time (from parse_date).')
-    endDateTime: str = Field(..., description='ISO 8601 end date/time (calculated or from parse_date).')
+    startDateTime: datetime.datetime = Field(..., description='A valid datetime object for the start time, ideally from parse_date.')
+    endDateTime: datetime.datetime = Field(..., description='A valid datetime object for the end time, ideally calculated or from parse_date.')
     resourceId: str = Field(..., description="Specific resource ID (from get_resources).")
     accessories: List[Dict[str, Any]] = Field(..., description="List of accessories to book with the reservation. Each item should be a dict with 'accessoryId' (str) and 'quantityRequested' (int). Example: [{'accessoryId': '1', 'quantityRequested': 1}]. Se non sono richiesti accessori, passare una lista vuota []. **Questo campo è obbligatorio.**")
 
 
 @tool(args_schema=CreateReservationArgs)
-def  create_reservation(session_token: str, user_id: str, startDateTime: str, endDateTime: str, resourceId: str, accessories: List[Dict[str, Any]], title: str = "", description: str = "") -> str:
+def  create_reservation(session_token: str, user_id: str, startDateTime: datetime.datetime, endDateTime: datetime.datetime, resourceId: str, accessories: List[Dict[str, Any]], title: str = "Reservation", description: str = "") -> str:
     """
     Crea una prenotazione per una risorsa specifica in un intervallo di tempo.
     Richiede una lista di accessori (anche vuota []), ciascuno con 'accessoryId' e 'quantityRequested'.
     **GESTIONE FALLIMENTI:** Se questo tool fallisce perché la risorsa non è disponibile
     (es. errore HTTP 409 o messaggio di conflitto) e in precedenza avevi verificato
     che altre risorse erano disponibili per lo stesso orario (tramite `get_availability`),
-    l'agente può tentare di prenotare **SOLO UNA SINGOLA RISORSA ALTERNATIVA**.
+    l'agente può tentare di prenotare **SOLO UNA SINGOLA RISORSA ALTERNATIVA** tra quelle risultate disponibili.
     Non effettuare chiamate multiple a `create_reservation` per diverse alternative in un unico turno.
     Dopo aver tentato la singola alternativa, riporta l'esito (successo o fallimento di quel tentativo).
     """
-    if not all([session_token, user_id, startDateTime, endDateTime, resourceId, accessories is not None]): # Aggiunto controllo accessories is not None
+    if not all([session_token, user_id, startDateTime, endDateTime, resourceId, accessories is not None]):
         return "❌ Errore: Mancano informazioni essenziali (token, user ID, date, resource ID)."
 
     if not resourceId.isdigit():
@@ -355,11 +395,16 @@ def  create_reservation(session_token: str, user_id: str, startDateTime: str, en
         return f"❌ Errore: resourceId '{resourceId}' non valido. Deve essere un numero."
 
     headers = {"X-Booked-SessionToken": session_token, "X-Booked-UserId": user_id}
+
+    # Converte i datetime in stringhe ISO 8601 corrette
+    start_iso = startDateTime.isoformat()
+    end_iso = endDateTime.isoformat()
+
     body = {
-        "title": title if title else "Reservation",
+        "title": title,
         "description": description,
-        "startDateTime": startDateTime,
-        "endDateTime": endDateTime,
+        "startDateTime": start_iso,
+        "endDateTime": end_iso,
         "resourceId": resourceId,
         "userId": user_id,
         "termsAccepted": True,
@@ -385,7 +430,7 @@ def  create_reservation(session_token: str, user_id: str, startDateTime: str, en
         body["accessories"] = processed_accessories
 
     log_body = {k: v for k, v in body.items() if k != "session_token"} # Non loggare il token nel corpo se per errore finisce lì
-    logger.debug(f"create_reservation: Corpo della richiesta: {json.dumps(log_body)}")
+    logger.debug(f"create_reservation: Corpo della richiesta (date formattate): {json.dumps(log_body)}")
 
     try:
         response = requests.post(f"{LIBREBOOKING_API_URL}/Reservations/", json=body, headers=headers)
@@ -399,22 +444,19 @@ def  create_reservation(session_token: str, user_id: str, startDateTime: str, en
         if ref_num:
             logger.info(f"create_reservation: Prenotazione creata con successo. Numero di riferimento: {ref_num}")
             # --- MODIFICA PER CORREGGERE LA VISUALIZZAZIONE DELL'ORARIO ---
-            try:
-                # startDateTime arriva in formato UTC (es. "2025-06-28T08:00:00+00:00")
-                start_dt_utc = dateparser.parse(startDateTime) # This is already UTC
-                if start_dt_utc:
-                    # Converti in fuso orario locale per la visualizzazione
-                    local_tz = dateutil.tz.gettz('Europe/Rome')
-                    start_dt_local = start_dt_utc.astimezone(local_tz)
-                    start_formatted = start_dt_local.strftime('%d/%m/%Y alle %H:%M')
-                else:
-                    start_formatted = startDateTime # Fallback
-            except Exception:
-                start_formatted = startDateTime # Fallback in caso di qualsiasi errore
+            # startDateTime è ora un oggetto datetime, quindi la conversione è più sicura
+            local_tz = dateutil.tz.gettz('Europe/Rome')
+            # Se il datetime in input non ha un fuso orario, assumiamo sia UTC
+            if startDateTime.tzinfo is None:
+                startDateTime = startDateTime.replace(tzinfo=datetime.timezone.utc)
+            
+            start_dt_local = startDateTime.astimezone(local_tz)
+            start_formatted = start_dt_local.strftime('%d/%m/%Y alle %H:%M')
+
             # --- FINE MODIFICA VISUALIZZAZIONE ---
             
             # Aggiungi l'orario UTC per l'LLM nel messaggio del tool
-            utc_time_for_llm = startDateTime # startDateTime è già in UTC
+            utc_time_for_llm = start_iso
             accessories_message_part = ""
             if accessories: # 'accessories' è l'argomento passato al tool con 'quantityRequested'
                 accessory_details_list = []
@@ -427,8 +469,13 @@ def  create_reservation(session_token: str, user_id: str, startDateTime: str, en
                 if accessory_details_list:
                     accessories_message_part = f" con accessori: {', '.join(accessory_details_list)}"
 
-            return (f"✅ {message} Prenotazione per la risorsa {resourceId} il {start_formatted} (UTC: {utc_time_for_llm}){accessories_message_part}.\n"
-                    f"Numero di riferimento: {ref_num}. Conservalo per future modifiche o cancellazioni. Titolo: '{title}'. Descrizione: '{description}'.")
+            # Formattazione migliorata per la risposta del tool
+            return (f"✅ {message}\n"
+                    f"- **Risorsa:** {resourceId}\n"
+                    f"- **Data:** {start_formatted} (UTC: {utc_time_for_llm})\n"
+                    f"- **Riferimento:** {ref_num}\n"
+                    f"- **Titolo:** '{title}'\n"
+                    f"- **Accessori:** {accessories_message_part if accessories_message_part else 'Nessuno'}")
         else:
             logger.warning("create_reservation: Prenotazione creata ma il numero di riferimento è vuoto.")
             # Anche se il ref_num è vuoto, la prenotazione potrebbe essere stata creata.
@@ -497,7 +544,7 @@ def update_reservation(
     if not all([session_token, user_id, reference_number, startDateTime, endDateTime, resourceId]):
         return "❌ Error: Missing essential information (token, user ID, ref number, dates, resource ID) for the update."
 
-    if not resourceId or not resourceId.isdigit():
+    if not isinstance(resourceId, str) or not resourceId.isdigit():
         logging.error(f"update_reservation: Attempt to update reservation {reference_number} with invalid resourceId: '{resourceId}'")
         return f"❌ Error: The resource ID '{resourceId}' provided for the update is invalid. It must be a number obtained from get_reservation or get_resources."
 
@@ -638,10 +685,28 @@ def get_availability_by_checking_bookings(session_token: str, user_id: str, reso
     try:
         response = requests.get(api_url, headers=headers, params=params)
         response.raise_for_status()
-        data = response.json()
+        
+        # Log del testo grezzo della risposta per il debug
+        raw_response_text = response.text
+        logging.debug(f"get_availability_by_checking_bookings: Risposta grezza API per risorsa {resource_id}: {raw_response_text}")
 
-        # Assumiamo che la risposta sia una lista di prenotazioni, possibilmente sotto una chiave "reservations".
-        reservations_found = data.get("reservations", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        try:
+            data = response.json()
+        except json.JSONDecodeError:
+            logger.error(f"get_availability_by_checking_bookings: La risposta per la risorsa {resource_id} non è un JSON valido.")
+            return f"❌ Errore: Il server ha restituito una risposta non valida per la risorsa {resource_id}."
+
+        # Controllo più robusto della struttura della risposta
+        if isinstance(data, dict) and "reservations" in data:
+            reservations_found = data["reservations"]
+            if not isinstance(reservations_found, list):
+                 logger.error(f"get_availability_by_checking_bookings: La chiave 'reservations' non contiene una lista per la risorsa {resource_id}.")
+                 return f"❌ Errore: Formato risposta inatteso dal server per la risorsa {resource_id}."
+        elif isinstance(data, list):
+            reservations_found = data
+        else:
+            logger.warning(f"get_availability_by_checking_bookings: La risposta API per la risorsa {resource_id} non è una lista o un dizionario con la chiave 'reservations'. La considero come non disponibile per sicurezza.")
+            return f"⚠️ Impossibile determinare la disponibilità per la risorsa {resource_id} a causa di una risposta API inattesa."
 
         if not reservations_found:
             # Nessuna prenotazione restituita dall'API nell'intervallo, quindi sicuramente disponibile.
@@ -679,7 +744,7 @@ def get_availability_by_checking_bookings(session_token: str, user_id: str, reso
                     logger.info(f"Trovata sovrapposizione per risorsa {resource_id} alle {req_start_dt.strftime('%H:%M')}. "
                                 f"Slot richiesto: [{req_start_dt.isoformat()}, {req_end_dt.isoformat()}]. "
                                 f"Prenotazione esistente: [{existing_booking_start_dt.isoformat()}, {existing_booking_end_dt.isoformat()}] "
-                                f"(Ref: {booking_data.get('referenceNumber', 'N/A')})")
+                                f"(Ref: {booking_data.get(' referenceNumber', 'N/A')})")
                     found_strict_overlap = True
                     break # Trovata una sovrapposizione, non serve controllare oltre
 
@@ -905,52 +970,69 @@ llm_with_tools = llm.bind_tools(tools)
 # Modifica le istruzioni di sistema per l'agente ReAct
 
 system_message = """
-Sei un assistente AI per la prenotazione di risorse. Il tuo flusso di lavoro è guidato da una StateGraph.
+Sei un assistente AI per la prenotazione di risorse, cortese e preciso. Il tuo flusso di lavoro è guidato da una StateGraph.
 Utilizza gli strumenti a tua disposizione per aiutare l'utente a prenotare, modificare o cancellare sale meeting.
 Segui scrupolosamente le condizioni d'uso di ciascuno strumento.
 
-**REGOLA FONDAMENTALE: SEMPLIFICARE LA PRENOTAZIONE**
-Il tuo obiettivo è creare una prenotazione di base il prima possibile, per poi offrire all'utente la possibilità di aggiungere dettagli (come accessori o numero di persone) tramite un aggiornamento.
+**CONTESTO TEMPORALE:** All'inizio di ogni turno, riceverai un messaggio di sistema con la data odierna. Usa quella data come riferimento per tutte le richieste relative al tempo (es. "questo luglio", "mercoledì prossimo").
+
+**REGOLA FONDAMENTALE: SEMPLIFICARE E CONFERMARE**
+Il tuo obiettivo è creare una prenotazione di base il prima possibile, per poi offrire all'utente la possibilità di aggiungere dettagli (come accessori o numero di persone) tramite un aggiornamento. Quando comunichi un successo o un fallimento all'utente, usa Markdown (grassetto, elenchi puntati) per rendere il messaggio chiaro e leggibile.
 
 --- FLUSSO DI PRENOTAZIONE ---
 
 1.  **Autenticazione (se necessaria):** Se non hai un token di sessione valido, il sistema chiamerà `authenticate_tool` per te. Parti dal presupposto di essere autenticato.
 
 2.  **Raccogli Info Essenziali:**
-    *   Interpreta la data e l'ora richieste dall'utente con `parse_date`.
-    *   Se l'utente non specifica una risorsa, usa `get_resources` per vedere le opzioni.
+    - Interpreta la data e l'ora richieste dall'utente con `parse_date`.
+    - Se l'utente non specifica una risorsa, usa `get_resources` per vedere le opzioni.
 
 3.  **Verifica Disponibilità e Crea Subito:**
-    *   Usa `get_availability_by_checking_bookings` per trovare una risorsa disponibile all'orario richiesto.
-    *   **AZIONE IMMEDIATA:** Appena trovi una risorsa disponibile, **DEVI** chiamare immediatamente `create_reservation`.
-    *   **PARAMETRI per `create_reservation`:**
-        *   Usa `resourceId`, `startDateTime`, e `endDateTime` (calcolata aggiungendo 1 ora a startDateTime) che hai appena verificato.
-        *   Per il `title`, usa "Prenotazione Utente [user_id]".
-        *   Per la `description`, puoi lasciare vuoto o inserire un testo generico.
-        *   **IMPORTANTE:** Per il campo `accessories`, passa **SEMPRE** una lista vuota `[]` in questa fase iniziale.
+    - Usa `get_availability_by_checking_bookings` per trovare una risorsa disponibile all'orario richiesto.
+    - **AZIONE IMMEDIATA:** Se trovi una o più risorse disponibili, **DEVI** sceglierne **SOLO UNA** (la prima della lista) e chiamare immediatamente `create_reservation` per quella singola risorsa. NON prenotare più risorse contemporaneamente.
+    - **PARAMETRI per la chiamata a `create_reservation`:**
+        - Usa `resourceId`, `startDateTime`, e `endDateTime` (calcolata aggiungendo 1 ora a startDateTime) che hai appena verificato.
+        - Per il `title`, usa "Prenotazione Utente [user_id]".
+        - Per la `description`, puoi lasciare vuoto o inserire un testo generico.
+        - **IMPORTANTE:** Per il campo `accessories`, passa **SEMPRE** una lista vuota `[]` in questa fase iniziale.
 
 4.  **Post-Creazione (Gestito dal sistema):**
-    *   Dopo una creazione riuscita, il sistema ti chiederà automaticamente se l'utente vuole aggiungere accessori. La tua responsabilità è gestire la risposta dell'utente nel turno successivo.
+    - Dopo una creazione riuscita, il sistema ti chiederà automaticamente se l'utente vuole aggiungere accessori. La tua responsabilità è gestire la risposta dell'utente nel turno successivo.
+    - **Formato Risposta Utente Post-Creazione:** Quando `create_reservation` ha successo, **DEVI** formulare la tua risposta all'utente ESATTAMENTE in questo formato, sostituendo i placeholder:
+      ```
+      ✅ **Prenotazione creata con successo!**
+
+      - **Risorsa:** [Nome della risorsa]
+      - **Riferimento:** [Numero di riferimento]
+
+      Conserva il numero di riferimento, ti servirà per eventuali modifiche o cancellazioni.
+
+      Vuoi aggiungere accessori o specificare il numero di partecipanti?
+      ```
 
 --- FLUSSO DI AGGIORNAMENTO (DOPO LA CREAZIONE) ---
 
-*   **SE** hai appena creato una prenotazione e il sistema ha chiesto all'utente se vuole aggiungere accessori (`awaiting_accessories_update: true`), il messaggio corrente dell'utente è la sua risposta.
-*   **Se l'utente dice 'no' o nega,** rispondi "Perfetto, la sua prenotazione rimane confermata." e termina.
-*   **Se l'utente dice 'sì' e fornisce dettagli** (es. "sì, per 10 persone e un proiettore"):
-    1.  Usa il numero di riferimento memorizzato nello stato (`last_created_ref`).
-    2.  **DEVI** prima chiamare `get_reservation` con quel numero di riferimento per recuperare i dettagli attuali (specialmente `resourceId`, `startDateTime`, `endDateTime`). Questo è FONDAMENTALE.
-    3.  Analizza la richiesta dell'utente per il numero di persone e gli accessori. Se necessario, chiama `get_accessories` per verificare la disponibilità e gli ID.
-    4.  Prepara i nuovi parametri per `update_reservation`. Aggiorna la `description` per riflettere le modifiche (es. "Per 10 persone con proiettore").
-    5.  Chiama `update_reservation`.
-    6.  Informa l'utente dell'esito.
+*   **CONTESTO:** Hai appena creato una prenotazione e chiesto all'utente se vuole aggiungere dettagli. Il messaggio corrente dell'utente è la sua risposta.
+*   **Se l'utente nega,** rispondi "Perfetto, la sua prenotazione rimane confermata." e termina.
+*   **Se l'utente accetta e fornisce dettagli** (es. "sì, per 10 persone e un proiettore"):
+    1.  Usa il numero di riferimento che hai appena fornito all'utente (memorizzato in `last_created_ref`).
+    2.  **DEVI** prima chiamare `get_reservation` con quel numero di riferimento per recuperare i dettagli **ESATTI** della prenotazione (`resourceId`, `startDateTime`, `endDateTime`). **Questo è FONDAMENTALE per evitare errori.**
+    3.  Analizza la richiesta dell'utente per il numero di persone e gli accessori. Se necessario, chiama `get_accessories` per verificare la disponibilità e gli ID degli accessori.
+    4.  Prepara i parametri per `update_reservation`.
+        - **Usa i valori `resourceId`, `startDateTime`, `endDateTime` ottenuti da `get_reservation` al punto 2.** NON usare valori da turni precedenti.
+        - Usa `num_people` per le sedie.
+        - Usa `accessories` per altri oggetti come il proiettore.
+        - Aggiorna la `description` per riflettere le modifiche (es. "Per 10 persone con proiettore").
+    5.  Chiama `update_reservation` con i parametri corretti.
+    6.  Informa l'utente dell'esito con una risposta ben formattata.
 
 --- ALTRI FLUSSI ---
 
 **Cancellazione Prenotazione:**
-1.  Usa `get_reservation` per recuperare i dettagli.
-2.  Mostra i dettagli all'utente.
-3.  Chiedi conferma ESATTA: 'Vuoi cancellare questa prenotazione? Rispondi "sì" per confermare.'
-4.  Se l'utente risponde 'sì', chiama `delete_reservation`.
+1. Usa `get_reservation` per recuperare i dettagli.
+2. Mostra i dettagli all'utente.
+3. Chiedi conferma ESATTA: 'Vuoi cancellare questa prenotazione? Rispondi "sì" per confermare.'
+4. Se l'utente risponde 'sì', chiama `delete_reservation`.
 
 **Modifica Prenotazione Esistente (non immediatamente dopo la creazione):**
 *   Simile al flusso di aggiornamento post-creazione. Chiedi il numero di riferimento, usa `get_reservation` per ottenere i dettagli attuali, raccogli le modifiche desiderate e poi chiama `update_reservation`.
@@ -1040,29 +1122,41 @@ def enhanced_react_agent_node(state: State) -> Dict[str, Any]:
     basati sui risultati dei tool chiamati in questo turno.
     Specificamente, popola `state.available_accessories` e gestisce il post-creazione.
     """
-    # --- PRE-PROCESSING: Inietta lo stato nel prompt per guidare l'agente ---
-    # Crea una copia dello stato da passare all'agente, potenzialmente modificata
     state_for_agent = state.copy()
     update_payload = {}  # Inizia con un payload vuoto
 
+    # --- PRE-PROCESSING: Inietta il contesto nel prompt per guidare l'agente ---
+    # Crea una lista di messaggi di contesto di sistema
+    system_context_messages = []
+
+    # 1. Aggiungi la data corrente per dare contesto temporale all'LLM
+    current_date_str = datetime.datetime.now().strftime('%Y-%m-%d')
+    date_context_message = SystemMessage(content=f"La data odierna è {current_date_str}. Interpreta le date relative (es. 'luglio') basandoti su questo.")
+    system_context_messages.append(date_context_message)
+
+    # 2. Aggiungi il fuso orario del client per guidare il tool `parse_date`
+    client_timezone = state.get("client_timezone")
+    if client_timezone:
+        tz_context_message = SystemMessage(content=f"Il fuso orario dell'utente è '{client_timezone}'. DEVI usare questo valore per il parametro 'client_timezone' quando chiami il tool `parse_date`.")
+        system_context_messages.append(tz_context_message)
+
     if state.get("awaiting_accessories_update"):
         last_ref = state.get("last_created_ref")
-        # Questo messaggio di sistema informa l'agente del contesto attuale
+        # 2. Aggiungi il contesto per il flusso di aggiornamento
         info_message_content = (
             f"NOTA DI SISTEMA: Sei nel flusso di aggiornamento per la prenotazione "
             f"appena creata con riferimento '{last_ref}'. "
             f"Il messaggio dell'utente è una risposta alla tua domanda sugli accessori. "
             f"Segui le istruzioni del 'FLUSSO DI AGGIORNAMENTO' per usare `get_reservation` e `update_reservation`."
         )
-        # Inserisci il messaggio di sistema all'inizio della cronologia
-        # per dare il massimo contesto all'agente per il turno corrente.
-        messages_for_agent = [SystemMessage(content=info_message_content)] + list(state["messages"])
-        state_for_agent["messages"] = messages_for_agent
-        logging.info("enhanced_react_agent_node: Inserito messaggio di stato per il flusso di aggiornamento.")
-        # Resetta il flag per evitare che venga riutilizzato in loop.
-        # L'agente dovrebbe ora chiamare update_reservation, che non riattiva questo flag.
+        system_context_messages.append(SystemMessage(content=info_message_content))
         update_payload["awaiting_accessories_update"] = False
         update_payload["last_created_ref"] = None
+
+    # Inserisci i messaggi di contesto all'inizio della cronologia
+    messages_for_agent = system_context_messages + list(state["messages"])
+    state_for_agent["messages"] = messages_for_agent
+    logging.info(f"enhanced_react_agent_node: Inseriti messaggi di contesto: {[msg.content for msg in system_context_messages]}")
 
     # --- AGENT INVOCATION ---
     agent_response_dict = react_agent_executor.invoke(state_for_agent)
@@ -1078,16 +1172,18 @@ def enhanced_react_agent_node(state: State) -> Dict[str, Any]:
             if msg.name == "create_reservation":
                 result_message = str(msg.content)
                 if "✅" in result_message:  # Se la prenotazione è stata creata con successo
-                    ref_match = re.search(r"Numero di riferimento: ([a-zA-Z0-9-]+)", result_message)
+                    # Correzione: Cerca "**Riferimento:**" per gestire il formato Markdown
+                    ref_match = re.search(r"\*\*Riferimento:\*\*\s*([a-zA-Z0-9-]+)", result_message)
                     if ref_match:
                         reference_number = ref_match.group(1)
                         # Imposta i flag per il prossimo turno
                         update_payload["awaiting_accessories_update"] = True
                         update_payload["last_created_ref"] = reference_number
 
-                        # --- MODIFICA: Unisci la domanda al messaggio di conferma ---
-                        follow_up_question = "\n\nVuole aggiungere accessori supplementari (es. sedie, proiettore) o modificare il numero di partecipanti?"
-                        
+                        # --- MODIFICA: Aggiungi la frase di conservazione e la domanda di follow-up ---
+                        reference_phrase = "\n\nConserva il numero di riferimento, ti servirà per eventuali modifiche o cancellazioni."
+                        follow_up_question = "\n\nVuoi aggiungere accessori o specificare il numero di partecipanti?"
+
                         last_ai_message = None
                         # Cerca l'ultimo messaggio di testo dell'AI nella risposta corrente
                         for i in reversed(range(len(agent_response_dict["messages"]))):
@@ -1095,15 +1191,17 @@ def enhanced_react_agent_node(state: State) -> Dict[str, Any]:
                             if isinstance(message, AIMessage) and not getattr(message, 'tool_calls', None):
                                 last_ai_message = message
                                 break
-                        
+
                         if last_ai_message and last_ai_message.content:
+                            last_ai_message.content += reference_phrase
                             last_ai_message.content += follow_up_question
-                            logging.info("enhanced_react_agent_node: Aggiunta domanda di follow-up al messaggio di conferma esistente.")
+                            logging.info("enhanced_react_agent_node: Aggiunta frase di riferimento e domanda di follow-up al messaggio di conferma.")
                         else:
                             # Fallback se non c'è un messaggio di testo a cui appendersi
-                            follow_up_message = AIMessage(content=follow_up_question.strip())
+                            full_follow_up = (reference_phrase + follow_up_question).strip()
+                            follow_up_message = AIMessage(content=full_follow_up)
                             agent_response_dict["messages"].append(follow_up_message)
-                            logging.warning("enhanced_react_agent_node: Nessun messaggio AI di conferma trovato, creata nuova domanda di follow-up.")
+                            logging.warning("enhanced_react_agent_node: Nessun messaggio AI di conferma trovato, creata nuova domanda di follow-up completa.")
                         # --- FINE MODIFICA ---
 
                         logging.info(f"enhanced_react_agent_node: Prenotazione creata ({reference_number}). Impostato stato per aggiornamento accessori.")
@@ -1322,23 +1420,14 @@ if __name__ == "__main__":
         print(json.dumps(response))
         
     except Exception as e:
-        logging.error(f"Errore generico: {e}", exc_info=True)
-        # Restituisci l'errore come JSON per il frontend
-        print(json.dumps({"error": f"Errore interno del server: {str(e)}"}), file=sys.stderr)
-        sys.exit(1) # Esci con codice di errore
-
-if __name__ == "__main__":
-    # Configura il logging
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    # Imposta un livello più basso per i log di librerie rumorose se necessario
-    # logging.getLogger("httpx").setLevel(logging.WARNING) # Commentato per debug più facile
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("langchain_core").setLevel(logging.WARNING)
-    logging.getLogger("langchain").setLevel(logging.WARNING)
-    logging.getLogger("dateparser").setLevel(logging.WARNING) # dateparser può essere rumoroso
-  
-  
-    # Esegui la funzione principale
-    main()
+        # Questo blocco è problematico e probabilmente non inteso per l'esecuzione del server.
+        # Se viene eseguito, causerà un'uscita. Lo commentiamo per sicurezza.
+        # logging.error(f"Errore generico: {e}", exc_info=True)
+        # print(json.dumps({"error": f"Errore interno del server: {str(e)}"}), file=sys.stderr)
+        # sys.exit(1)
+   
+        # Esegui la funzione principale solo se il file viene eseguito direttamente
+        # e non ci sono argomenti da riga di comando (che indicano un'esecuzione diversa)
+        if len(sys.argv) == 1:
+            main()
   

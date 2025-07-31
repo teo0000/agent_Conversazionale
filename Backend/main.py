@@ -3,13 +3,25 @@ from fastapi.responses import JSONResponse
 import speech_recognition as sr
 from gtts import gTTS
 import io
-from Backend.agent import agent_node, State
+from agent import agent_node, State, graph, serialize_messages # Importa il grafo e le funzioni necessarie
 import logging
 from pydub import AudioSegment
 import os
 from fastapi.middleware.cors import CORSMiddleware
 import re # Aggiunto per la pulizia del testo
-from fastapi.responses import StreamingResponse # Aggiunto per TTS
+from fastapi.responses import StreamingResponse
+import requests
+from fastapi import Body
+from dotenv import load_dotenv
+import base64
+import os
+import asyncio # Aggiunto per lo streaming
+from sse_starlette.sse import EventSourceResponse
+from pydantic import BaseModel
+from typing import List, Dict, Any
+
+load_dotenv()
+DID_API_KEY = os.getenv("DID_API_KEY")
 
 app = FastAPI()
 logging.basicConfig(level=logging.DEBUG)
@@ -18,7 +30,7 @@ logger.info("Test log dal file main.py")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Puoi specificare l'origine esatta se vuoi essere più restrittivo
+    allow_origins=["http://localhost:3000", "*"],  # Permetti richieste dal tuo frontend React
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -51,6 +63,46 @@ async def agent_endpoint(request: Request):
         return JSONResponse(
             content={"error": f"Errore interno del server: {str(e)}"}, status_code=500
         )
+
+# --- NUOVO ENDPOINT PER LA CHAT IN STREAMING ---
+
+# 1. Definiamo un modello per la richiesta (compatibile con Vercel AI SDK)
+class ChatRequest(BaseModel):
+    messages: List[Dict[str, Any]]
+
+async def stream_generator(chat_request: ChatRequest):
+    """
+    Genera la risposta in streaming usando il grafo da agent.py.
+    """
+    # Prepara lo stato iniziale per il grafo
+    initial_state = State(messages=chat_request.messages)
+
+    # Usa astream_log per ottenere i chunk di output man mano che vengono prodotti
+    # Questo ci permette di inviare solo il contenuto dei messaggi dell'assistente
+    async for op in graph.astream_log(initial_state):
+        for op_val in op.values():
+            # Cerchiamo l'output del nodo agente principale
+            if op_val.get("metadata", {}).get("name") == "main_agent_flow_node":
+                messages = op_val.get("output", {}).get("messages", [])
+                if messages:
+                    # L'ultimo messaggio è di solito quello dell'assistente
+                    last_message = messages[-1]
+                    # Assicuriamoci che sia un messaggio dell'AI e non una chiamata a un tool
+                    if last_message.get("type") == "ai" and last_message.get("content"):
+                        # Invia solo il contenuto del messaggio
+                        yield last_message["content"]
+                        # Aggiungiamo un piccolo delay per un effetto di "scrittura" più naturale
+                        await asyncio.sleep(0.05)
+
+@app.post("/api/chat")
+async def chat_streaming_endpoint(request: ChatRequest):
+    """
+    Endpoint che riceve la cronologia della chat e restituisce la risposta in streaming.
+    Ora utilizza il grafo completo definito in agent.py.
+    """
+    logger.info(f"Richiesta di streaming ricevuta per /api/chat con {len(request.messages)} messaggi.")
+    # Passiamo l'intera richiesta al generatore di streaming
+    return EventSourceResponse(stream_generator(request))
 
 @app.post("/agent/audio")
 async def audio_agent(file: UploadFile = File(...)):
@@ -117,3 +169,4 @@ async def text_to_speech_endpoint(request: Request):
     except Exception as e:
         logger.error(f"Errore durante la sintesi vocale (TTS): {e}", exc_info=True)
         return JSONResponse({"error": f"Errore durante la sintesi vocale: {str(e)}"}, status_code=500)
+
