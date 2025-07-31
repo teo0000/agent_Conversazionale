@@ -24,8 +24,8 @@ import { cleanTextForProcessing } from "../../lib/text-utils";
 import { Button } from "@/components/ui/button";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
-// import RealisticAvatar from "@/components/assistant-ui/AnimatedAvatar";
-import VoiceChat from "../assistant-ui/VoiceChat";
+import AnimatedAvatar from "@/components/assistant-ui/AnimatedAvatar";
+import VoiceChat from "@/components/assistant-ui/VoiceChat";
 
 export const Thread: FC = () => {
   const [showVoiceChat, setShowVoiceChat] = React.useState(false);
@@ -213,10 +213,13 @@ export const Thread: FC = () => {
   };
 
   return (
-    <ThreadPrimitive.Root
+    <>
+      <AnimatedAvatar isSpeaking={isAudioPlaying} />
+      <ThreadPrimitive.Root
       className="bg-background box-border flex h-full flex-col overflow-hidden"
       style={{
         ["--thread-max-width" as string]: "42rem",
+        paddingLeft: "260px", // Spazio per l'avatar a sinistra
       }}
     >
       <ThreadPrimitive.Viewport className="flex h-full flex-col items-center overflow-y-scroll scroll-smooth bg-inherit px-4 pt-8">
@@ -244,13 +247,6 @@ export const Thread: FC = () => {
             const isThisAudioPlaying = isLastMessage && isAudioPlaying;
             return (
               <div key={idx} className="flex justify-start w-full max-w-[var(--thread-max-width)] py-4 items-end gap-3">
-                {/* <RealisticAvatar
-                  className="w-10 h-10 rounded-full border-2 border-blue-200 dark:border-blue-800 shadow-lg"
-                  imageClassName="rounded-full"
-                  objectFit="cover"
-                  videoUrl={videoUrl}
-                  onVideoEnd={() => setVideoUrl("")}
-                /> */}
                 <div className="text-foreground bg-blue-100 dark:bg-blue-900 max-w-[calc(var(--thread-max-width)*0.8)] break-words leading-7 rounded-3xl px-5 py-2.5">
                   <MarkdownText text={msg.content} />
                 </div>
@@ -330,7 +326,8 @@ export const Thread: FC = () => {
           onProcessTranscribedText={(text) => handleSend(text, true)}
         />
       )}
-    </ThreadPrimitive.Root>
+      </ThreadPrimitive.Root>
+    </>
   );
 };
 
@@ -353,15 +350,6 @@ const ThreadWelcome: FC = () => {
     <ThreadPrimitive.Empty>
       <div className="flex w-full max-w-[var(--thread-max-width)] flex-grow flex-col items-center justify-center">
         <div className="bg-white/90 dark:bg-zinc-900/80 shadow-lg rounded-2xl p-8 flex flex-col items-center animate-fade-in-up transition-all duration-700 mt-16 text-center">
-          <div className="mb-4">
-            {/* <RealisticAvatar
-              className="w-24 h-24 rounded-full border-2 border-blue-200 dark:border-blue-800 shadow-lg"
-              imageClassName="rounded-full"
-              objectFit="cover"
-              videoUrl=""
-              onVideoEnd={() => { }}
-            /> */}
-          </div>
           <h2 className="text-xl font-bold text-center mb-2 text-blue-700 dark:text-blue-300">Ciao! Sono il tuo assistente virtuale.</h2>
           <p className="text-center text-base text-zinc-700 dark:text-zinc-200 max-w-lg">
             Posso gestire le tue prenotazioni:<br />

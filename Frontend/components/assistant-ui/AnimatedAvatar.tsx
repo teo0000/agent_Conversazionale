@@ -1,15 +1,29 @@
 
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Avatar } from '@readyplayerme/visage';
+import { createPortal } from "react-dom";
+
 
 const avatarId = "68722574bf6cc44ef5b3e85f";
 const avatarUrl = `https://models.readyplayer.me/${avatarId}.glb`;
+
+interface AnimatedAvatarProps {
+    isSpeaking?: boolean;
+}
 
 /**
  * AnimatedAvatar: avatar 3D con animazione braccia e viso (jaw) durante il parlato.
  * L'animazione viene attivata tramite la prop isSpeaking.
  */
-export default function AnimatedAvatar({ isSpeaking = false }: { isSpeaking?: boolean }) {
+export default function AnimatedAvatar({ isSpeaking = false }: AnimatedAvatarProps) {
+
+    const [isMounted, setIsMounted] = useState(false);
+
+    useEffect(() => {
+        // Questo assicura che il codice venga eseguito solo sul client, evitando problemi con SSR
+        setIsMounted(true);
+    }, []);
+
     const jawBoneRef = useRef<any>(null);
     const leftArmRef = useRef<any>(null);
     const rightArmRef = useRef<any>(null);
@@ -44,8 +58,10 @@ export default function AnimatedAvatar({ isSpeaking = false }: { isSpeaking?: bo
     }, []);
 
     useEffect(() => {
+
         let frameId: number;
         let t = 0;
+
         function animate() {
             t += 0.1;
             // Muovi la jaw (mandibola) su/giù per simulare il parlato
@@ -65,7 +81,29 @@ export default function AnimatedAvatar({ isSpeaking = false }: { isSpeaking?: bo
         return () => cancelAnimationFrame(frameId);
     }, [isSpeaking]);
 
-    return (
-        <Avatar modelSrc={avatarUrl} style={{ width: 220, height: 550 }} shadows />
+    // Non renderizzare nulla sul server o prima del montaggio sul client
+    if (!isMounted) {
+        return null;
+    }
+
+    // Creiamo l'elemento Avatar che verrà renderizzato nel portale
+    const avatarElement = (
+        <Avatar
+            modelSrc={avatarUrl}
+            style={{
+                position: 'fixed',
+                top: '50%',
+                left: '20px',
+                transform: 'translateY(-50%)',
+                zIndex: 1000,
+                width: 220,
+                height: 550,
+                // Aggiungi un bordo o uno sfondo se vuoi testarne la visibilità
+                // border: '2px solid red' 
+            }}
+            shadows />
     );
+
+    // Usiamo createPortal per renderizzare l'avatar direttamente nel body del documento
+    return createPortal(avatarElement, document.body);
 }
